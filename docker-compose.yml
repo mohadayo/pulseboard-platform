@@ -1,0 +1,47 @@
+services:
+  user-api:
+    build: ./services/user-api
+    ports:
+      - "${USER_API_PORT:-5001}:5001"
+    environment:
+      - USER_API_PORT=5001
+      - JWT_SECRET=${JWT_SECRET:-pulseboard-dev-secret}
+      - TOKEN_EXPIRY_HOURS=${TOKEN_EXPIRY_HOURS:-24}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  analytics-engine:
+    build: ./services/analytics-engine
+    ports:
+      - "${ANALYTICS_PORT:-5002}:5002"
+    environment:
+      - ANALYTICS_PORT=5002
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  notification-service:
+    build: ./services/notification-service
+    ports:
+      - "${NOTIFICATION_PORT:-5003}:5003"
+    environment:
+      - NOTIFICATION_PORT=5003
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
