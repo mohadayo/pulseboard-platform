@@ -63,14 +63,57 @@ app.post("/api/notifications/send", (req: Request, res: Response) => {
   res.status(201).json(notification);
 });
 
+// ページネーションの既定値・上限。
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 100;
+
+// parsePaginationParam はクエリ文字列を整数として検証する。
+// 未指定なら fallback を返し、不正値（数値でない・範囲外）なら null を返す。
+function parsePaginationParam(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number | null {
+  if (raw === undefined) {
+    return fallback;
+  }
+  // 整数のみ許可（小数や指数表記、空文字を拒否）。
+  if (!/^-?\d+$/.test(raw)) {
+    return null;
+  }
+  const value = parseInt(raw, 10);
+  if (value < min || value > max) {
+    return null;
+  }
+  return value;
+}
+
 app.get("/api/notifications", (req: Request, res: Response) => {
   const userId = req.query.user_id as string | undefined;
+
+  const limit = parsePaginationParam(req.query.limit as string | undefined, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  if (limit === null) {
+    log("WARN", `Invalid limit: ${req.query.limit}`);
+    res.status(400).json({ error: `limit must be an integer between 1 and ${MAX_LIMIT}` });
+    return;
+  }
+
+  const offset = parsePaginationParam(req.query.offset as string | undefined, 0, 0, Number.MAX_SAFE_INTEGER);
+  if (offset === null) {
+    log("WARN", `Invalid offset: ${req.query.offset}`);
+    res.status(400).json({ error: "offset must be a non-negative integer" });
+    return;
+  }
+
   let result = notifications;
   if (userId) {
     result = notifications.filter((n) => n.user_id === userId);
   }
-  log("INFO", `Listing notifications: ${result.length} found`);
-  res.json(result);
+
+  const page = result.slice(offset, offset + limit);
+  log("INFO", `Listing notifications: ${page.length} returned (total=${result.length} limit=${limit} offset=${offset})`);
+  res.json(page);
 });
 
 app.get("/api/notifications/:id", (req: Request, res: Response) => {
