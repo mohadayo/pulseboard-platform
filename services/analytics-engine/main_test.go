@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func resetState() {
@@ -120,6 +122,60 @@ func TestStatsHandler(t *testing.T) {
 	}
 	if stats.ByUser["u1"] != 2 {
 		t.Fatalf("expected 2 events for u1, got %d", stats.ByUser["u1"])
+	}
+}
+
+func TestTrackHandler_BodyTooLarge(t *testing.T) {
+	resetState()
+	original := maxBodyBytes
+	maxBodyBytes = 16
+	defer func() { maxBodyBytes = original }()
+
+	body, _ := json.Marshal(map[string]string{"user_id": "u1", "event_type": "page_view", "payload": strings.Repeat("x", 1024)})
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/track", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	trackHandler(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+
+	mu.RLock()
+	n := len(events)
+	mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("expected no event stored on oversized body, got %d", n)
+	}
+}
+
+func TestNewServerTimeouts(t *testing.T) {
+	srv := newServer(":5002", newRouter())
+	if srv.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("expected ReadHeaderTimeout 5s, got %v", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout != 15*time.Second {
+		t.Fatalf("expected ReadTimeout 15s, got %v", srv.ReadTimeout)
+	}
+	if srv.WriteTimeout != 15*time.Second {
+		t.Fatalf("expected WriteTimeout 15s, got %v", srv.WriteTimeout)
+	}
+	if srv.IdleTimeout != 60*time.Second {
+		t.Fatalf("expected IdleTimeout 60s, got %v", srv.IdleTimeout)
+	}
+}
+
+func TestNewRouter(t *testing.T) {
+	resetState()
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /health via router, got %d", resp.StatusCode)
 	}
 }
 
