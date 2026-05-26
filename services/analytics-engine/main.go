@@ -2,13 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
+
+const defaultMaxBodyBytes = 1 << 20 // 1 MiB
+
+// maxBodyBytes はリクエストボディの最大バイト数。main で MAX_BODY_BYTES から上書きされる。
+var maxBodyBytes int64 = defaultMaxBodyBytes
 
 type Event struct {
 	ID        string `json:"id"`
@@ -19,21 +26,31 @@ type Event struct {
 }
 
 type StatsResponse struct {
-	TotalEvents  int            `json:"total_events"`
-	ByType       map[string]int `json:"by_type"`
-	ByUser       map[string]int `json:"by_user"`
-	LastEventAt  string         `json:"last_event_at,omitempty"`
+	TotalEvents int            `json:"total_events"`
+	ByType      map[string]int `json:"by_type"`
+	ByUser      map[string]int `json:"by_user"`
+	LastEventAt string         `json:"last_event_at,omitempty"`
 }
 
 var (
-	events []Event
-	mu     sync.RWMutex
+	events  []Event
+	mu      sync.RWMutex
 	counter int
 )
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("Invalid %s=%q, using fallback %d", key, v, fallback)
 	}
 	return fallback
 }
@@ -54,8 +71,17 @@ func trackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 過大なペイロードによるメモリ枯渇を防ぐためボディサイズを制限する。
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+
 	var evt Event
 	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			log.Printf("Request body too large (limit %d bytes)", maxBodyBytes)
+			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 		log.Printf("Invalid event payload: %v", err)
 		http.Error(w, `{"error":"invalid JSON payload"}`, http.StatusBadRequest)
 		return
@@ -123,17 +149,36 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(events)
 }
 
-func main() {
-	port := getEnv("ANALYTICS_PORT", "5002")
-
+// newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
+func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/analytics/track", trackHandler)
 	mux.HandleFunc("/api/analytics/stats", statsHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
+	return mux
+}
 
-	log.Printf("Starting analytics-engine on port %s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+// newServer はスロークライアント攻撃やコネクションリーク対策として
+// 各種タイムアウトを設定した http.Server を返す。
+func newServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func main() {
+	port := getEnv("ANALYTICS_PORT", "5002")
+	maxBodyBytes = int64(getEnvInt("MAX_BODY_BYTES", defaultMaxBodyBytes))
+
+	srv := newServer(":"+port, newRouter())
+	log.Printf("Starting analytics-engine on port %s (max body %d bytes)", port, maxBodyBytes)
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
