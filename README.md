@@ -72,7 +72,11 @@ npm run dev
 | POST | `/api/users/register` | Register a new user |
 | POST | `/api/users/login` | Login and receive JWT |
 | GET | `/api/users/me` | Get current user profile (requires JWT) |
-| GET | `/api/users` | List all users |
+| GET | `/api/users` | List users (pagination: `?limit=&offset=`) |
+
+> Email addresses are normalized (trimmed + lowercased) on register/login, so
+> `Foo@x.com` and `foo@x.com` map to the same account. Registration validates
+> the email format and enforces a minimum password length (`MIN_PASSWORD_LENGTH`).
 
 **Register:**
 ```bash
@@ -155,7 +159,12 @@ See [`.env.example`](.env.example) for all available configuration options.
 | `USER_API_PORT` | `5001` | User API listen port |
 | `JWT_SECRET` | `pulseboard-dev-secret` | JWT signing secret |
 | `TOKEN_EXPIRY_HOURS` | `24` | JWT token expiry in hours |
+| `MIN_PASSWORD_LENGTH` | `6` | Minimum password length on registration |
+| `USERS_DEFAULT_LIMIT` | `50` | Default page size for `GET /api/users` |
+| `USERS_MAX_LIMIT` | `200` | Maximum page size for `GET /api/users` |
 | `ANALYTICS_PORT` | `5002` | Analytics Engine listen port |
+| `MAX_EVENTS` | `10000` | Max in-memory events retained (FIFO eviction) |
+| `MAX_BODY_BYTES` | `1048576` | Max request body size for event tracking |
 | `NOTIFICATION_PORT` | `5003` | Notification Service listen port |
 | `LOG_LEVEL` | `INFO` | Log verbosity level |
 
