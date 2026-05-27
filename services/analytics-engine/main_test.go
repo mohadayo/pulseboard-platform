@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,6 +146,36 @@ func TestTrackHandler_BodyTooLarge(t *testing.T) {
 	mu.RUnlock()
 	if n != 0 {
 		t.Fatalf("expected no event stored on oversized body, got %d", n)
+	}
+}
+
+func TestTrackHandler_EvictsOldEvents(t *testing.T) {
+	resetState()
+	original := maxEvents
+	maxEvents = 3
+	defer func() { maxEvents = original }()
+
+	for i := 0; i < 5; i++ {
+		body, _ := json.Marshal(map[string]string{"user_id": fmt.Sprintf("u%d", i), "event_type": "page_view"})
+		req := httptest.NewRequest(http.MethodPost, "/api/analytics/track", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		trackHandler(w, req)
+	}
+
+	mu.RLock()
+	n := len(events)
+	oldest := ""
+	if n > 0 {
+		oldest = events[0].UserID
+	}
+	mu.RUnlock()
+
+	if n != 3 {
+		t.Fatalf("expected store capped at 3, got %d", n)
+	}
+	// 古い u0/u1 が破棄され、先頭は u2 になっているはず。
+	if oldest != "u2" {
+		t.Fatalf("expected oldest retained event to be u2, got %s", oldest)
 	}
 }
 

@@ -17,6 +17,12 @@ const defaultMaxBodyBytes = 1 << 20 // 1 MiB
 // maxBodyBytes はリクエストボディの最大バイト数。main で MAX_BODY_BYTES から上書きされる。
 var maxBodyBytes int64 = defaultMaxBodyBytes
 
+const defaultMaxEvents = 10000
+
+// maxEvents はインメモリに保持するイベント数の上限。main で MAX_EVENTS から上書きされる。
+// 上限を超えた分は古いものから FIFO で破棄し、無制限なメモリ増加を防ぐ。
+var maxEvents = defaultMaxEvents
+
 type Event struct {
 	ID        string `json:"id"`
 	UserID    string `json:"user_id"`
@@ -98,6 +104,11 @@ func trackHandler(w http.ResponseWriter, r *http.Request) {
 	evt.ID = fmt.Sprintf("evt_%d", counter)
 	evt.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	events = append(events, evt)
+	if maxEvents > 0 && len(events) > maxEvents {
+		removed := len(events) - maxEvents
+		events = events[removed:]
+		log.Printf("Evicted %d old event(s) (store capped at %d)", removed, maxEvents)
+	}
 	mu.Unlock()
 
 	log.Printf("Event tracked: type=%s user=%s", evt.EventType, evt.UserID)
@@ -175,9 +186,10 @@ func newServer(addr string, handler http.Handler) *http.Server {
 func main() {
 	port := getEnv("ANALYTICS_PORT", "5002")
 	maxBodyBytes = int64(getEnvInt("MAX_BODY_BYTES", defaultMaxBodyBytes))
+	maxEvents = getEnvInt("MAX_EVENTS", defaultMaxEvents)
 
 	srv := newServer(":"+port, newRouter())
-	log.Printf("Starting analytics-engine on port %s (max body %d bytes)", port, maxBodyBytes)
+	log.Printf("Starting analytics-engine on port %s (max body %d bytes, max events %d)", port, maxBodyBytes, maxEvents)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
