@@ -1,4 +1,3 @@
-import json
 import pytest
 from app import app, users_db
 
@@ -87,3 +86,71 @@ def test_list_users(client):
     assert resp.status_code == 200
     data = resp.get_json()
     assert len(data) == 2
+
+
+def test_register_normalizes_email_case(client):
+    resp = client.post("/api/users/register", json={"email": "Alice@Example.com", "password": "pass123"})
+    assert resp.status_code == 201
+    assert resp.get_json()["email"] == "alice@example.com"
+
+
+def test_register_normalizes_email_whitespace(client):
+    resp = client.post("/api/users/register", json={"email": "  bob@example.com  ", "password": "pass123"})
+    assert resp.status_code == 201
+    assert resp.get_json()["email"] == "bob@example.com"
+
+
+def test_register_rejects_case_duplicate(client):
+    client.post("/api/users/register", json={"email": "user@example.com", "password": "pass123"})
+    resp = client.post("/api/users/register", json={"email": "USER@EXAMPLE.COM", "password": "pass456"})
+    assert resp.status_code == 409
+
+
+def test_login_is_case_insensitive(client):
+    client.post("/api/users/register", json={"email": "user@example.com", "password": "pass123"})
+    resp = client.post("/api/users/login", json={"email": "User@Example.com", "password": "pass123"})
+    assert resp.status_code == 200
+    assert "token" in resp.get_json()
+
+
+def test_register_invalid_email_format(client):
+    resp = client.post("/api/users/register", json={"email": "not-an-email", "password": "pass123"})
+    assert resp.status_code == 400
+
+
+def test_register_blank_email(client):
+    resp = client.post("/api/users/register", json={"email": "   ", "password": "pass123"})
+    assert resp.status_code == 400
+
+
+def test_register_password_too_short(client):
+    resp = client.post("/api/users/register", json={"email": "short@example.com", "password": "x"})
+    assert resp.status_code == 400
+
+
+def test_register_non_string_email(client):
+    resp = client.post("/api/users/register", json={"email": 123, "password": "pass123"})
+    assert resp.status_code == 400
+
+
+def test_list_users_pagination(client):
+    for i in range(5):
+        client.post("/api/users/register", json={"email": f"u{i}@example.com", "password": "pass123"})
+    resp = client.get("/api/users?limit=2&offset=1")
+    assert resp.status_code == 200
+    assert len(resp.get_json()) == 2
+
+
+def test_list_users_invalid_limit(client):
+    resp = client.get("/api/users?limit=abc")
+    assert resp.status_code == 400
+
+
+def test_list_users_limit_too_large(client):
+    resp = client.get("/api/users?limit=99999")
+    assert resp.status_code == 400
+
+
+def test_list_users_negative_offset(client):
+    resp = client.get("/api/users?offset=-1")
+    assert resp.status_code == 400
