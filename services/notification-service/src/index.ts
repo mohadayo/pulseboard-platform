@@ -67,6 +67,23 @@ app.post("/api/notifications/send", (req: Request, res: Response) => {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
+// GET /api/notifications でフィルタとして許容する値。
+// POST /api/notifications/send の validChannels と整合させる。
+const ALLOWED_CHANNELS: Notification["channel"][] = ["email", "sms", "push"];
+const ALLOWED_STATUSES: Notification["status"][] = ["pending", "sent", "failed"];
+
+// 単一スカラのクエリ値のみ受理する（配列・オブジェクトは無効扱い）。
+// 未指定は undefined を返し、無効型なら null を返す（呼び出し側が 400）。
+function parseSingleScalarParam(raw: unknown): string | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== "string") {
+    return null;
+  }
+  return raw;
+}
+
 // parsePaginationParam はクエリ文字列を整数として検証する。
 // 未指定なら fallback を返し、不正値（数値でない・範囲外）なら null を返す。
 function parsePaginationParam(
@@ -92,6 +109,40 @@ function parsePaginationParam(
 app.get("/api/notifications", (req: Request, res: Response) => {
   const userId = req.query.user_id as string | undefined;
 
+  // channel / status は単一スカラのみ受理し、空文字や配列・オブジェクトは
+  // 「フィルタ無効」とする（部分的な絞り込み事故を避けるため）。
+  const channelRaw = parseSingleScalarParam(req.query.channel);
+  if (channelRaw === null || channelRaw === "") {
+    log("WARN", `Invalid channel filter: ${JSON.stringify(req.query.channel)}`);
+    res.status(400).json({
+      error: `channel must be one of: ${ALLOWED_CHANNELS.join(", ")}`,
+    });
+    return;
+  }
+  if (channelRaw !== undefined && !ALLOWED_CHANNELS.includes(channelRaw as Notification["channel"])) {
+    log("WARN", `Invalid channel filter: ${channelRaw}`);
+    res.status(400).json({
+      error: `channel must be one of: ${ALLOWED_CHANNELS.join(", ")}`,
+    });
+    return;
+  }
+
+  const statusRaw = parseSingleScalarParam(req.query.status);
+  if (statusRaw === null || statusRaw === "") {
+    log("WARN", `Invalid status filter: ${JSON.stringify(req.query.status)}`);
+    res.status(400).json({
+      error: `status must be one of: ${ALLOWED_STATUSES.join(", ")}`,
+    });
+    return;
+  }
+  if (statusRaw !== undefined && !ALLOWED_STATUSES.includes(statusRaw as Notification["status"])) {
+    log("WARN", `Invalid status filter: ${statusRaw}`);
+    res.status(400).json({
+      error: `status must be one of: ${ALLOWED_STATUSES.join(", ")}`,
+    });
+    return;
+  }
+
   const limit = parsePaginationParam(req.query.limit as string | undefined, DEFAULT_LIMIT, 1, MAX_LIMIT);
   if (limit === null) {
     log("WARN", `Invalid limit: ${req.query.limit}`);
@@ -106,13 +157,22 @@ app.get("/api/notifications", (req: Request, res: Response) => {
     return;
   }
 
-  let result = notifications;
+  let result: Notification[] = notifications;
   if (userId) {
-    result = notifications.filter((n) => n.user_id === userId);
+    result = result.filter((n) => n.user_id === userId);
+  }
+  if (channelRaw !== undefined) {
+    result = result.filter((n) => n.channel === channelRaw);
+  }
+  if (statusRaw !== undefined) {
+    result = result.filter((n) => n.status === statusRaw);
   }
 
   const page = result.slice(offset, offset + limit);
-  log("INFO", `Listing notifications: ${page.length} returned (total=${result.length} limit=${limit} offset=${offset})`);
+  log(
+    "INFO",
+    `Listing notifications: ${page.length} returned (total=${result.length} limit=${limit} offset=${offset} channel=${channelRaw ?? "-"} status=${statusRaw ?? "-"})`,
+  );
   res.json(page);
 });
 

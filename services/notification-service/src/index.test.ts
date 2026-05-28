@@ -169,6 +169,105 @@ describe("GET /api/notifications pagination", () => {
   });
 });
 
+describe("GET /api/notifications channel/status filters", () => {
+  async function seedMixed(): Promise<void> {
+    await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "email",
+      title: "T-email-1",
+      message: "M",
+    });
+    await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "sms",
+      title: "T-sms-1",
+      message: "M",
+    });
+    await request(app).post("/api/notifications/send").send({
+      user_id: "u2",
+      channel: "push",
+      title: "T-push-1",
+      message: "M",
+    });
+    await request(app).post("/api/notifications/send").send({
+      user_id: "u2",
+      channel: "email",
+      title: "T-email-2",
+      message: "M",
+    });
+  }
+
+  it("filters by channel=email", async () => {
+    await seedMixed();
+    const res = await request(app).get("/api/notifications?channel=email");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.every((n: { channel: string }) => n.channel === "email")).toBe(true);
+  });
+
+  it("filters by channel=push", async () => {
+    await seedMixed();
+    const res = await request(app).get("/api/notifications?channel=push");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].channel).toBe("push");
+  });
+
+  it("rejects unknown channel value", async () => {
+    const res = await request(app).get("/api/notifications?channel=telegram");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("channel");
+  });
+
+  it("rejects empty channel value", async () => {
+    const res = await request(app).get("/api/notifications?channel=");
+    expect(res.status).toBe(400);
+  });
+
+  it("filters by status=sent", async () => {
+    await seedMixed();
+    const res = await request(app).get("/api/notifications?status=sent");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(4);
+    expect(res.body.every((n: { status: string }) => n.status === "sent")).toBe(true);
+  });
+
+  it("rejects unknown status value", async () => {
+    const res = await request(app).get("/api/notifications?status=draft");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("status");
+  });
+
+  it("combines channel + user_id filters (AND)", async () => {
+    await seedMixed();
+    const res = await request(app).get("/api/notifications?channel=email&user_id=u2");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].channel).toBe("email");
+    expect(res.body[0].user_id).toBe("u2");
+  });
+
+  it("combines channel + status + pagination", async () => {
+    await seedMixed();
+    const res = await request(app).get("/api/notifications?channel=email&status=sent&limit=1&offset=1");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].channel).toBe("email");
+  });
+
+  it("returns empty array when no notifications match the filter", async () => {
+    await seedMixed();
+    const res = await request(app).get("/api/notifications?channel=sms&user_id=u2");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(0);
+  });
+
+  it("rejects channel as array (duplicated query)", async () => {
+    const res = await request(app).get("/api/notifications?channel=email&channel=sms");
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("GET /api/notifications/:id", () => {
   it("retrieves a notification by id", async () => {
     const sendRes = await request(app).post("/api/notifications/send").send({
