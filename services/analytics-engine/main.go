@@ -23,6 +23,18 @@ const defaultMaxEvents = 10000
 // 上限を超えた分は古いものから FIFO で破棄し、無制限なメモリ増加を防ぐ。
 var maxEvents = defaultMaxEvents
 
+const (
+	defaultEventsPageLimit = 50
+	defaultEventsMaxLimit  = 500
+)
+
+// /api/analytics/events のページネーション設定。main で
+// EVENTS_DEFAULT_LIMIT / EVENTS_MAX_LIMIT から上書きされる。
+var (
+	eventsDefaultLimit = defaultEventsPageLimit
+	eventsMaxLimit     = defaultEventsMaxLimit
+)
+
 type Event struct {
 	ID        string `json:"id"`
 	UserID    string `json:"user_id"`
@@ -146,18 +158,85 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
+// parseEventsPageQuery は limit / offset を検証する。
+// 戻り値の error が nil でなければ呼び出し側で 400 を返す。
+func parseEventsPageQuery(q map[string][]string) (limit, offset int, err error) {
+	limit = eventsDefaultLimit
+	if vs, ok := q["limit"]; ok && len(vs) > 0 {
+		n, perr := strconv.Atoi(vs[0])
+		if perr != nil || n < 1 || n > eventsMaxLimit {
+			return 0, 0, fmt.Errorf("limit must be an integer between 1 and %d", eventsMaxLimit)
+		}
+		limit = n
+	}
+	offset = 0
+	if vs, ok := q["offset"]; ok && len(vs) > 0 {
+		n, perr := strconv.Atoi(vs[0])
+		if perr != nil || n < 0 {
+			return 0, 0, fmt.Errorf("offset must be a non-negative integer")
+		}
+		offset = n
+	}
+	return limit, offset, nil
+}
+
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
-	mu.RLock()
-	defer mu.RUnlock()
+	query := r.URL.Query()
+	limit, offset, perr := parseEventsPageQuery(query)
+	if perr != nil {
+		log.Printf("Invalid events query: %v", perr)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": perr.Error()})
+		return
+	}
+	eventType := query.Get("event_type")
+	userID := query.Get("user_id")
 
-	log.Printf("Events list requested: %d events", len(events))
+	mu.RLock()
+	filtered := make([]Event, 0, len(events))
+	for _, e := range events {
+		if eventType != "" && e.EventType != eventType {
+			continue
+		}
+		if userID != "" && e.UserID != userID {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	mu.RUnlock()
+
+	total := len(filtered)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := filtered[start:end]
+	if page == nil {
+		page = []Event{}
+	}
+
+	log.Printf(
+		"Events list requested: total=%d returned=%d limit=%d offset=%d event_type=%q user_id=%q",
+		total, len(page), limit, offset, eventType, userID,
+	)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(events)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"events": page,
+		"count":  len(page),
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 // newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
@@ -187,6 +266,11 @@ func main() {
 	port := getEnv("ANALYTICS_PORT", "5002")
 	maxBodyBytes = int64(getEnvInt("MAX_BODY_BYTES", defaultMaxBodyBytes))
 	maxEvents = getEnvInt("MAX_EVENTS", defaultMaxEvents)
+	eventsDefaultLimit = getEnvInt("EVENTS_DEFAULT_LIMIT", defaultEventsPageLimit)
+	eventsMaxLimit = getEnvInt("EVENTS_MAX_LIMIT", defaultEventsMaxLimit)
+	if eventsDefaultLimit > eventsMaxLimit {
+		eventsDefaultLimit = eventsMaxLimit
+	}
 
 	srv := newServer(":"+port, newRouter())
 	log.Printf("Starting analytics-engine on port %s (max body %d bytes, max events %d)", port, maxBodyBytes, maxEvents)
