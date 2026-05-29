@@ -210,6 +210,15 @@ func TestNewRouter(t *testing.T) {
 	}
 }
 
+// EventsListResponse は eventsHandler のページネーション付きレスポンス形状。
+type EventsListResponse struct {
+	Events []Event `json:"events"`
+	Count  int     `json:"count"`
+	Total  int     `json:"total"`
+	Limit  int     `json:"limit"`
+	Offset int     `json:"offset"`
+}
+
 func TestEventsHandler(t *testing.T) {
 	resetState()
 	body, _ := json.Marshal(map[string]string{"user_id": "u1", "event_type": "signup"})
@@ -225,9 +234,136 @@ func TestEventsHandler(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var evts []Event
-	json.NewDecoder(w.Body).Decode(&evts)
-	if len(evts) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(evts))
+	var resp EventsListResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp.Total != 1 || resp.Count != 1 || len(resp.Events) != 1 {
+		t.Fatalf("expected total=1 count=1 len=1, got total=%d count=%d len=%d",
+			resp.Total, resp.Count, len(resp.Events))
+	}
+	if resp.Limit != eventsDefaultLimit {
+		t.Fatalf("expected default limit=%d, got %d", eventsDefaultLimit, resp.Limit)
+	}
+	if resp.Offset != 0 {
+		t.Fatalf("expected offset=0, got %d", resp.Offset)
+	}
+}
+
+func TestEventsHandler_PaginationAndFilters(t *testing.T) {
+	resetState()
+	seed := []map[string]string{
+		{"user_id": "u1", "event_type": "page_view"},
+		{"user_id": "u2", "event_type": "click"},
+		{"user_id": "u1", "event_type": "page_view"},
+		{"user_id": "u3", "event_type": "signup"},
+		{"user_id": "u1", "event_type": "click"},
+	}
+	for _, s := range seed {
+		body, _ := json.Marshal(s)
+		req := httptest.NewRequest(http.MethodPost, "/api/analytics/track", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		trackHandler(w, req)
+	}
+
+	t.Run("limit and offset", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/events?limit=2&offset=1", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var resp EventsListResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode error: %v", err)
+		}
+		if resp.Total != 5 || resp.Count != 2 || resp.Limit != 2 || resp.Offset != 1 {
+			t.Fatalf("unexpected page: %+v", resp)
+		}
+		if resp.Events[0].UserID != "u2" || resp.Events[1].UserID != "u1" {
+			t.Fatalf("unexpected ordering: %+v", resp.Events)
+		}
+	})
+
+	t.Run("filter by event_type", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/events?event_type=page_view", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 2 || resp.Count != 2 {
+			t.Fatalf("expected 2 page_view events, got total=%d count=%d", resp.Total, resp.Count)
+		}
+		for _, e := range resp.Events {
+			if e.EventType != "page_view" {
+				t.Fatalf("expected only page_view, got %s", e.EventType)
+			}
+		}
+	})
+
+	t.Run("filter by user_id", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/events?user_id=u1", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 3 {
+			t.Fatalf("expected total=3 for u1, got %d", resp.Total)
+		}
+		for _, e := range resp.Events {
+			if e.UserID != "u1" {
+				t.Fatalf("expected only u1, got %s", e.UserID)
+			}
+		}
+	})
+
+	t.Run("combined filters", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/events?user_id=u1&event_type=click", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 1 || resp.Events[0].UserID != "u1" || resp.Events[0].EventType != "click" {
+			t.Fatalf("unexpected: %+v", resp)
+		}
+	})
+
+	t.Run("offset past total returns empty page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/events?offset=100", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 5 || resp.Count != 0 || len(resp.Events) != 0 {
+			t.Fatalf("expected empty page, got %+v", resp)
+		}
+	})
+}
+
+func TestEventsHandler_InvalidPagination(t *testing.T) {
+	resetState()
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"non-numeric limit", "/api/analytics/events?limit=abc"},
+		{"zero limit", "/api/analytics/events?limit=0"},
+		{"negative limit", "/api/analytics/events?limit=-1"},
+		{"limit over max", fmt.Sprintf("/api/analytics/events?limit=%d", eventsMaxLimit+1)},
+		{"non-numeric offset", "/api/analytics/events?offset=abc"},
+		{"negative offset", "/api/analytics/events?offset=-1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, c.url, nil)
+			w := httptest.NewRecorder()
+			eventsHandler(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (body=%s)", w.Code, w.Body.String())
+			}
+		})
 	}
 }
