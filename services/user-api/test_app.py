@@ -85,7 +85,13 @@ def test_list_users(client):
     resp = client.get("/api/users")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert len(data) == 2
+    assert data["total"] == 2
+    assert data["count"] == 2
+    assert len(data["users"]) == 2
+    assert data["sort"] == "created_at"
+    assert data["order"] == "asc"
+    # created_at が返却に含まれること（pagination で並び替え可能なため）
+    assert all("created_at" in u for u in data["users"])
 
 
 def test_register_normalizes_email_case(client):
@@ -138,7 +144,94 @@ def test_list_users_pagination(client):
         client.post("/api/users/register", json={"email": f"u{i}@example.com", "password": "pass123"})
     resp = client.get("/api/users?limit=2&offset=1")
     assert resp.status_code == 200
-    assert len(resp.get_json()) == 2
+    data = resp.get_json()
+    assert len(data["users"]) == 2
+    assert data["count"] == 2
+    assert data["total"] == 5
+    assert data["limit"] == 2
+    assert data["offset"] == 1
+
+
+def test_list_users_q_filters_by_email(client):
+    client.post("/api/users/register", json={"email": "alice@example.com", "password": "pass123", "name": "Alice"})
+    client.post("/api/users/register", json={"email": "bob@example.com", "password": "pass123", "name": "Bob"})
+    client.post("/api/users/register", json={"email": "carol@other.org", "password": "pass123", "name": "Carol"})
+    resp = client.get("/api/users?q=example.com")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    emails = sorted(u["email"] for u in data["users"])
+    assert emails == ["alice@example.com", "bob@example.com"]
+
+
+def test_list_users_q_filters_by_name_case_insensitive(client):
+    client.post("/api/users/register", json={"email": "a@example.com", "password": "pass123", "name": "Alice"})
+    client.post("/api/users/register", json={"email": "b@example.com", "password": "pass123", "name": "alfred"})
+    client.post("/api/users/register", json={"email": "c@example.com", "password": "pass123", "name": "Bob"})
+    resp = client.get("/api/users?q=AL")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+
+
+def test_list_users_q_blank_is_ignored(client):
+    client.post("/api/users/register", json={"email": "a@example.com", "password": "pass123", "name": "Alice"})
+    resp = client.get("/api/users?q=   ")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+
+
+def test_list_users_q_too_long(client):
+    resp = client.get("/api/users?q=" + "x" * 9999)
+    assert resp.status_code == 400
+
+
+def test_list_users_sort_email_asc(client):
+    client.post("/api/users/register", json={"email": "c@example.com", "password": "pass123", "name": "Carol"})
+    client.post("/api/users/register", json={"email": "a@example.com", "password": "pass123", "name": "Alice"})
+    client.post("/api/users/register", json={"email": "b@example.com", "password": "pass123", "name": "Bob"})
+    resp = client.get("/api/users?sort=email&order=asc")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [u["email"] for u in data["users"]] == [
+        "a@example.com",
+        "b@example.com",
+        "c@example.com",
+    ]
+
+
+def test_list_users_sort_name_desc(client):
+    client.post("/api/users/register", json={"email": "a@example.com", "password": "pass123", "name": "Alice"})
+    client.post("/api/users/register", json={"email": "b@example.com", "password": "pass123", "name": "Carol"})
+    client.post("/api/users/register", json={"email": "c@example.com", "password": "pass123", "name": "Bob"})
+    resp = client.get("/api/users?sort=name&order=desc")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [u["name"] for u in data["users"]] == ["Carol", "Bob", "Alice"]
+
+
+def test_list_users_invalid_sort_field(client):
+    resp = client.get("/api/users?sort=password")
+    assert resp.status_code == 400
+
+
+def test_list_users_invalid_order(client):
+    resp = client.get("/api/users?order=random")
+    assert resp.status_code == 400
+
+
+def test_list_users_q_and_sort_combine(client):
+    client.post("/api/users/register", json={"email": "alice@example.com", "password": "pass123", "name": "Alice"})
+    client.post("/api/users/register", json={"email": "bob@example.com", "password": "pass123", "name": "Bob"})
+    client.post("/api/users/register", json={"email": "carol@other.org", "password": "pass123", "name": "Carol"})
+    resp = client.get("/api/users?q=example.com&sort=email&order=desc")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [u["email"] for u in data["users"]] == [
+        "bob@example.com",
+        "alice@example.com",
+    ]
 
 
 def test_list_users_invalid_limit(client):

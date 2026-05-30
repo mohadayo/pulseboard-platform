@@ -217,6 +217,8 @@ type EventsListResponse struct {
 	Total  int     `json:"total"`
 	Limit  int     `json:"limit"`
 	Offset int     `json:"offset"`
+	Sort   string  `json:"sort"`
+	Order  string  `json:"order"`
 }
 
 func TestEventsHandler(t *testing.T) {
@@ -366,4 +368,230 @@ func TestEventsHandler_InvalidPagination(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseAnalyticsTime(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{"rfc3339 z", "2024-01-02T03:04:05Z", false},
+		{"rfc3339 offset", "2024-01-02T03:04:05+09:00", false},
+		{"rfc3339 nano", "2024-01-02T03:04:05.123456Z", false},
+		{"blank", "", true},
+		{"whitespace", "   ", true},
+		{"not a date", "yesterday", true},
+		{"date only", "2024-01-02", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseAnalyticsTime(c.in)
+			if c.wantErr && err == nil {
+				t.Fatalf("expected error for %q, got nil", c.in)
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q: %v", c.in, err)
+			}
+		})
+	}
+}
+
+// 内部の events ストアに直接時刻指定でイベントを並べるユーティリティ。
+// trackHandler 経由だと Timestamp が time.Now() に固定されるため、since/until の
+// 範囲テストを書くには時刻の異なるイベントが必要。
+func seedEventsAt(seed []struct {
+	ID        string
+	UserID    string
+	EventType string
+	Timestamp string
+}) {
+	mu.Lock()
+	defer mu.Unlock()
+	events = nil
+	counter = 0
+	for _, s := range seed {
+		events = append(events, Event{
+			ID:        s.ID,
+			UserID:    s.UserID,
+			EventType: s.EventType,
+			Timestamp: s.Timestamp,
+		})
+		counter++
+	}
+}
+
+func TestEventsHandler_SinceUntilFilters(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "page_view", "2024-01-01T00:00:00Z"},
+		{"evt_2", "u1", "page_view", "2024-01-02T00:00:00Z"},
+		{"evt_3", "u1", "page_view", "2024-01-03T00:00:00Z"},
+		{"evt_4", "u1", "page_view", "2024-01-04T00:00:00Z"},
+	})
+
+	t.Run("since only includes equal", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?since=2024-01-02T00:00:00Z", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
+		}
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 3 {
+			t.Fatalf("expected 3 (Jan 2,3,4), got %d", resp.Total)
+		}
+	})
+
+	t.Run("until includes equal", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?until=2024-01-02T00:00:00Z", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 2 {
+			t.Fatalf("expected 2 (Jan 1,2), got %d", resp.Total)
+		}
+	})
+
+	t.Run("range", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?since=2024-01-02T00:00:00Z&until=2024-01-03T00:00:00Z", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Total != 2 {
+			t.Fatalf("expected 2 (Jan 2,3), got %d", resp.Total)
+		}
+	})
+
+	t.Run("invalid since", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?since=not-a-date", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("invalid until", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?until=2024-13-99", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("until before since rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?since=2024-02-01T00:00:00Z&until=2024-01-01T00:00:00Z", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
+}
+
+func TestEventsHandler_SortAndOrder(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_a", "u3", "click", "2024-01-03T00:00:00Z"},
+		{"evt_b", "u1", "signup", "2024-01-01T00:00:00Z"},
+		{"evt_c", "u2", "page_view", "2024-01-02T00:00:00Z"},
+	})
+
+	t.Run("default sort is timestamp asc", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/analytics/events", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Sort != "timestamp" || resp.Order != "asc" {
+			t.Fatalf("expected sort=timestamp order=asc, got sort=%s order=%s",
+				resp.Sort, resp.Order)
+		}
+		if len(resp.Events) != 3 ||
+			resp.Events[0].ID != "evt_b" ||
+			resp.Events[1].ID != "evt_c" ||
+			resp.Events[2].ID != "evt_a" {
+			t.Fatalf("unexpected ordering: %+v", resp.Events)
+		}
+	})
+
+	t.Run("timestamp desc", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?sort=timestamp&order=desc", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Events[0].ID != "evt_a" ||
+			resp.Events[2].ID != "evt_b" {
+			t.Fatalf("unexpected desc ordering: %+v", resp.Events)
+		}
+	})
+
+	t.Run("sort by event_type asc", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?sort=event_type", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		// click < page_view < signup (lexically)
+		if resp.Events[0].EventType != "click" ||
+			resp.Events[1].EventType != "page_view" ||
+			resp.Events[2].EventType != "signup" {
+			t.Fatalf("unexpected event_type ordering: %+v", resp.Events)
+		}
+	})
+
+	t.Run("sort by user_id desc", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?sort=user_id&order=desc", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		var resp EventsListResponse
+		json.NewDecoder(w.Body).Decode(&resp)
+		if resp.Events[0].UserID != "u3" ||
+			resp.Events[2].UserID != "u1" {
+			t.Fatalf("unexpected user_id desc: %+v", resp.Events)
+		}
+	})
+
+	t.Run("invalid sort", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?sort=password", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("invalid order", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/analytics/events?order=random", nil)
+		w := httptest.NewRecorder()
+		eventsHandler(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+	})
 }
