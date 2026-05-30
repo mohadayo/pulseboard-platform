@@ -30,6 +30,12 @@ MIN_PASSWORD_LENGTH = max(1, int(os.getenv("MIN_PASSWORD_LENGTH", "6")))
 USERS_DEFAULT_LIMIT = max(1, int(os.getenv("USERS_DEFAULT_LIMIT", "50")))
 USERS_MAX_LIMIT = max(USERS_DEFAULT_LIMIT, int(os.getenv("USERS_MAX_LIMIT", "200")))
 MAX_OFFSET = 1_000_000_000
+# GET /api/users の検索文字列 q の最大長。クライアントが極端に長い文字列を渡してきた際の
+# CPU 消費・ログ肥大を抑える。
+MAX_SEARCH_LENGTH = max(1, int(os.getenv("MAX_SEARCH_LENGTH", "200")))
+
+ALLOWED_USER_SORT_FIELDS = {"email", "name", "created_at"}
+ALLOWED_SORT_ORDERS = {"asc", "desc"}
 
 users_db: dict[str, dict] = {}
 
@@ -160,6 +166,26 @@ def get_current_user():
     return jsonify({"id": user["id"], "email": user["email"], "name": user["name"], "created_at": user["created_at"]})
 
 
+def _normalize_q(raw):
+    """`q` パラメータを正規化する。
+
+    戻り値は (正規化後の値, エラーメッセージ)。
+    - None や trim 後が空 → (None, None) ：フィルタしない
+    - 上限超過 → (None, ".. too long") ：呼び出し側で 400 を返す対象
+    - 正常 → (lowercased, None)
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, "q must be a string"
+    stripped = raw.strip()
+    if not stripped:
+        return None, None
+    if len(stripped) > MAX_SEARCH_LENGTH:
+        return None, f"q must be at most {MAX_SEARCH_LENGTH} characters"
+    return stripped.lower(), None
+
+
 @app.route("/api/users", methods=["GET"])
 def list_users():
     limit = _parse_pagination_param(request.args.get("limit"), USERS_DEFAULT_LIMIT, 1, USERS_MAX_LIMIT)
@@ -171,10 +197,60 @@ def list_users():
         logger.warning("Invalid offset: %s", request.args.get("offset"))
         return jsonify({"error": "offset must be a non-negative integer"}), 400
 
-    all_users = [{"id": u["id"], "email": u["email"], "name": u["name"]} for u in users_db.values()]
-    page = all_users[offset:offset + limit]
-    logger.info("Listing users: %d returned (total=%d limit=%d offset=%d)", len(page), len(all_users), limit, offset)
-    return jsonify(page)
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    sort_field = request.args.get("sort", "created_at")
+    if sort_field not in ALLOWED_USER_SORT_FIELDS:
+        logger.warning("Invalid sort field: %s", sort_field)
+        return jsonify({
+            "error": f"sort must be one of: {', '.join(sorted(ALLOWED_USER_SORT_FIELDS))}",
+        }), 400
+    sort_order = request.args.get("order", "asc")
+    if sort_order not in ALLOWED_SORT_ORDERS:
+        logger.warning("Invalid sort order: %s", sort_order)
+        return jsonify({
+            "error": f"order must be one of: {', '.join(sorted(ALLOWED_SORT_ORDERS))}",
+        }), 400
+
+    matched = []
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        matched.append(u)
+
+    reverse = sort_order == "desc"
+    matched.sort(key=lambda u: u.get(sort_field, ""), reverse=reverse)
+
+    total = len(matched)
+    page_records = matched[offset:offset + limit]
+    page = [
+        {
+            "id": u["id"],
+            "email": u["email"],
+            "name": u["name"],
+            "created_at": u["created_at"],
+        }
+        for u in page_records
+    ]
+    logger.info(
+        "Listing users: %d returned (total=%d limit=%d offset=%d q=%s sort=%s order=%s)",
+        len(page), total, limit, offset, q, sort_field, sort_order,
+    )
+    return jsonify({
+        "users": page,
+        "count": len(page),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort_field,
+        "order": sort_order,
+    })
 
 
 if __name__ == "__main__":
