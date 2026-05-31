@@ -33,6 +33,8 @@ MAX_OFFSET = 1_000_000_000
 # GET /api/users の検索文字列 q の最大長。クライアントが極端に長い文字列を渡してきた際の
 # CPU 消費・ログ肥大を抑える。
 MAX_SEARCH_LENGTH = max(1, int(os.getenv("MAX_SEARCH_LENGTH", "200")))
+# `name` の最大長。register 時の型・長さ検証で使用する。
+MAX_NAME_LENGTH = max(1, int(os.getenv("MAX_NAME_LENGTH", "100")))
 
 ALLOWED_USER_SORT_FIELDS = {"email", "name", "created_at"}
 ALLOWED_SORT_ORDERS = {"asc", "desc"}
@@ -99,6 +101,20 @@ def register():
     if len(password) < MIN_PASSWORD_LENGTH:
         return jsonify({"error": f"Password must be at least {MIN_PASSWORD_LENGTH} characters"}), 400
 
+    # `name` の型・長さを検証する。未指定なら "" を入れる。
+    # 検証していないと数値・配列・オブジェクトが保存され、後段の
+    # GET /api/users（`name.lower()` / sort 比較）で 500 を起こす。
+    name_raw = data.get("name", "")
+    if name_raw is None:
+        name = ""
+    elif not isinstance(name_raw, str):
+        logger.warning("Registration attempt with non-string name")
+        return jsonify({"error": "Name must be a string"}), 400
+    else:
+        name = name_raw.strip()
+        if len(name) > MAX_NAME_LENGTH:
+            return jsonify({"error": f"Name must be at most {MAX_NAME_LENGTH} characters"}), 400
+
     if email in users_db:
         logger.warning("Registration attempt with existing email: %s", email)
         return jsonify({"error": "User already exists"}), 409
@@ -108,11 +124,11 @@ def register():
         "id": user_id,
         "email": email,
         "password": hash_password(password),
-        "name": data.get("name", ""),
+        "name": name,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     logger.info("User registered: %s", email)
-    return jsonify({"id": user_id, "email": email, "name": data.get("name", "")}), 201
+    return jsonify({"id": user_id, "email": email, "name": name}), 201
 
 
 @app.route("/api/users/login", methods=["POST"])
