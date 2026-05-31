@@ -247,3 +247,93 @@ def test_list_users_limit_too_large(client):
 def test_list_users_negative_offset(client):
     resp = client.get("/api/users?offset=-1")
     assert resp.status_code == 400
+
+
+def test_register_rejects_non_string_name(client):
+    # name に数値を渡しても 201 で受理されると、後段の GET /api/users が
+    # `name.lower()` で 500 する。明示的に 400 で拒否する。
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": 42},
+    )
+    assert resp.status_code == 400
+    assert "Name" in resp.get_json()["error"]
+
+
+def test_register_rejects_list_name(client):
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": ["A", "B"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_register_rejects_dict_name(client):
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": {"first": "A"}},
+    )
+    assert resp.status_code == 400
+
+
+def test_register_rejects_name_too_long(client):
+    # 既定 MAX_NAME_LENGTH=100。境界として 101 文字は弾かれる。
+    long_name = "a" * 101
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": long_name},
+    )
+    assert resp.status_code == 400
+    assert "100" in resp.get_json()["error"]
+
+
+def test_register_accepts_max_length_name(client):
+    # 境界値 100 文字は受理されること（境界の上側だけ弾く）。
+    name = "a" * 100
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": name},
+    )
+    assert resp.status_code == 201
+    assert resp.get_json()["name"] == name
+
+
+def test_register_trims_name_whitespace(client):
+    # 前後空白は除去して保存される。
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": "  Alice  "},
+    )
+    assert resp.status_code == 201
+    assert resp.get_json()["name"] == "Alice"
+
+
+def test_register_accepts_null_name_as_empty(client):
+    # JSON null は "" 扱い（既存挙動：name 未指定と同等）。
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "pass123", "name": None},
+    )
+    assert resp.status_code == 201
+    assert resp.get_json()["name"] == ""
+
+
+def test_list_users_with_q_does_not_500_after_register(client):
+    # 回帰テスト：name 検証が無いと、name=int で登録 → q 検索が 500 になる。
+    # 修正後は登録自体が 400 で弾かれるので、後段の検索は安全に動く。
+    client.post(
+        "/api/users/register",
+        json={"email": "valid@example.com", "password": "pass123", "name": "Valid"},
+    )
+    # `name` を弾く例（先に投入した valid ユーザーには影響なし）
+    bad = client.post(
+        "/api/users/register",
+        json={"email": "bad@example.com", "password": "pass123", "name": 42},
+    )
+    assert bad.status_code == 400
+
+    resp = client.get("/api/users?q=val")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+    assert data["users"][0]["email"] == "valid@example.com"
