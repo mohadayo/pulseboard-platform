@@ -220,11 +220,98 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 }
 
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		listEventsHandler(w, r)
+	case http.MethodDelete:
+		deleteEventsHandler(w, r)
+	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+// deleteEventsHandler は user_id / event_type / before の AND フィルタで
+// 一致するイベントを削除する。誤った全件削除を防ぐためフィルタは少なくとも 1 つ必要。
+func deleteEventsHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	userID := strings.TrimSpace(query.Get("user_id"))
+	eventType := strings.TrimSpace(query.Get("event_type"))
+
+	var before *time.Time
+	if raw := query.Get("before"); raw != "" {
+		t, err := parseAnalyticsTime(raw)
+		if err != nil {
+			log.Printf("Invalid before on delete: %v", err)
+			writeJSONError(
+				w,
+				http.StatusBadRequest,
+				fmt.Sprintf("query parameter 'before' %s", err.Error()),
+			)
+			return
+		}
+		before = &t
+	}
+
+	if userID == "" && eventType == "" && before == nil {
+		writeJSONError(
+			w,
+			http.StatusBadRequest,
+			"at least one of 'user_id', 'event_type', or 'before' must be provided",
+		)
 		return
 	}
 
+	mu.Lock()
+	kept := events[:0:0] // 元の events のキャパシティを再利用しない（GC を促す）
+	deleted := 0
+	for _, e := range events {
+		// 全フィルタに合致するなら削除対象（=保持しない）
+		matchUser := userID == "" || e.UserID == userID
+		matchType := eventType == "" || e.EventType == eventType
+		matchBefore := true
+		if before != nil {
+			ts, terr := time.Parse(time.RFC3339, e.Timestamp)
+			// 破損したタイムスタンプはフィルタの取りこぼし／誤削除を避けるため保持
+			matchBefore = terr == nil && ts.Before(*before)
+		}
+		if matchUser && matchType && matchBefore {
+			deleted++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	events = kept
+	mu.Unlock()
+
+	beforeOut := ""
+	if before != nil {
+		beforeOut = before.Format(time.RFC3339)
+	}
+	log.Printf(
+		"Events deleted: count=%d user_id=%q event_type=%q before=%q",
+		deleted, userID, eventType, beforeOut,
+	)
+
+	resp := map[string]interface{}{
+		"deleted":    deleted,
+		"user_id":    nullableString(userID),
+		"event_type": nullableString(eventType),
+		"before":     nullableString(beforeOut),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// nullableString は空文字列を JSON null として表現するためのヘルパ。
+// レスポンスでフィルタ未指定を明示するため、`""` ではなく `null` を返す。
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func listEventsHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	limit, offset, perr := parseEventsPageQuery(query)
 	if perr != nil {
