@@ -595,3 +595,185 @@ func TestEventsHandler_SortAndOrder(t *testing.T) {
 		}
 	})
 }
+
+// seedDeletableEvents は削除テスト用の固定タイムスタンプを持つイベント群を直接挿入する。
+func seedDeletableEvents() {
+	mu.Lock()
+	events = []Event{
+		{ID: "evt_1", UserID: "u1", EventType: "click", Timestamp: "2026-01-01T00:00:00Z"},
+		{ID: "evt_2", UserID: "u1", EventType: "view", Timestamp: "2026-02-01T00:00:00Z"},
+		{ID: "evt_3", UserID: "u2", EventType: "click", Timestamp: "2026-03-01T00:00:00Z"},
+		{ID: "evt_4", UserID: "u2", EventType: "view", Timestamp: "2026-04-01T00:00:00Z"},
+		{ID: "evt_5", UserID: "u3", EventType: "purchase", Timestamp: "2026-05-01T00:00:00Z"},
+	}
+	mu.Unlock()
+}
+
+func TestDeleteEvents_MissingFiltersReturns400(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	req := httptest.NewRequest(http.MethodDelete, "/api/analytics/events", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	// 念のため、何も削除されていないこと
+	mu.RLock()
+	got := len(events)
+	mu.RUnlock()
+	if got != 5 {
+		t.Fatalf("expected 5 events still present, got %d", got)
+	}
+}
+
+func TestDeleteEvents_ByUserID(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/analytics/events?user_id=u1", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2, got %v", resp["deleted"])
+	}
+	if resp["user_id"] != "u1" {
+		t.Fatalf("expected echo user_id=u1, got %v", resp["user_id"])
+	}
+	if resp["event_type"] != nil {
+		t.Fatalf("expected event_type=null, got %v", resp["event_type"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(events) != 3 {
+		t.Fatalf("expected 3 remaining, got %d", len(events))
+	}
+	for _, e := range events {
+		if e.UserID == "u1" {
+			t.Fatalf("u1 event still present: %s", e.ID)
+		}
+	}
+}
+
+func TestDeleteEvents_ByEventType(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/analytics/events?event_type=click", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2, got %v", resp["deleted"])
+	}
+}
+
+func TestDeleteEvents_Before(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/analytics/events?before=2026-03-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	// 2026-03-01 “未満”（厳密 <）なので 1月 / 2月 の 2 件のみ
+	if int(resp["deleted"].(float64)) != 2 {
+		t.Fatalf("expected deleted=2, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(events) != 3 {
+		t.Fatalf("expected 3 remaining, got %d", len(events))
+	}
+}
+
+func TestDeleteEvents_CombinedFilters(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	// user_id=u2 かつ event_type=click → evt_3 のみ
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/analytics/events?user_id=u2&event_type=click", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 1 {
+		t.Fatalf("expected deleted=1, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(events) != 4 {
+		t.Fatalf("expected 4 remaining, got %d", len(events))
+	}
+	for _, e := range events {
+		if e.ID == "evt_3" {
+			t.Fatalf("evt_3 should have been deleted")
+		}
+	}
+}
+
+func TestDeleteEvents_NoMatchReturnsZero(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/analytics/events?user_id=nonexistent", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if int(resp["deleted"].(float64)) != 0 {
+		t.Fatalf("expected deleted=0, got %v", resp["deleted"])
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(events) != 5 {
+		t.Fatalf("expected all 5 still present, got %d", len(events))
+	}
+}
+
+func TestDeleteEvents_InvalidBeforeReturns400(t *testing.T) {
+	resetState()
+	seedDeletableEvents()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/analytics/events?before=not-a-date", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !strings.Contains(resp["error"], "before") {
+		t.Fatalf("expected error to mention 'before', got %q", resp["error"])
+	}
+}
+
+func TestDeleteEvents_MethodNotAllowedStillWorks(t *testing.T) {
+	// 非 GET/DELETE は引き続き 405
+	resetState()
+	req := httptest.NewRequest(http.MethodPut, "/api/analytics/events", nil)
+	w := httptest.NewRecorder()
+	eventsHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
