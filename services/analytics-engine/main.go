@@ -162,31 +162,100 @@ func trackHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(evt)
 }
 
+// parseAnalyticsQueryTime は since / until / before 等のクエリパラメータを
+// 共通で読み出し、空のときは nil を、不正フォーマットでは error を返す。
+// 呼び出し側はエラーをそのまま 400 のメッセージに使える。
+func parseAnalyticsQueryTime(raw, field string) (*time.Time, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	t, err := parseAnalyticsTime(raw)
+	if err != nil {
+		return nil, fmt.Errorf("query parameter %q %s", field, err.Error())
+	}
+	return &t, nil
+}
+
+// matchEventFilters は単一イベントが (event_type, user_id, since, until) 全フィルタに
+// 合致するかを返す。listEventsHandler と statsHandler で同じ判定を共有する。
+// 破損した Event.Timestamp は時刻フィルタの取りこぼし防止のため除外する。
+func matchEventFilters(e Event, eventType, userID string, since, until *time.Time) bool {
+	if eventType != "" && e.EventType != eventType {
+		return false
+	}
+	if userID != "" && e.UserID != userID {
+		return false
+	}
+	if since == nil && until == nil {
+		return true
+	}
+	ts, terr := time.Parse(time.RFC3339, e.Timestamp)
+	if terr != nil {
+		return false
+	}
+	if since != nil && ts.Before(*since) {
+		return false
+	}
+	if until != nil && ts.After(*until) {
+		return false
+	}
+	return true
+}
+
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
-	mu.RLock()
-	defer mu.RUnlock()
+	query := r.URL.Query()
+	eventType := strings.TrimSpace(query.Get("event_type"))
+	userID := strings.TrimSpace(query.Get("user_id"))
+
+	since, err := parseAnalyticsQueryTime(query.Get("since"), "since")
+	if err != nil {
+		log.Printf("Invalid stats since: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	until, err := parseAnalyticsQueryTime(query.Get("until"), "until")
+	if err != nil {
+		log.Printf("Invalid stats until: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		writeJSONError(w, http.StatusBadRequest, "query parameter 'until' must be greater than or equal to 'since'")
+		return
+	}
 
 	stats := StatsResponse{
-		TotalEvents: len(events),
-		ByType:      make(map[string]int),
-		ByUser:      make(map[string]int),
+		ByType: make(map[string]int),
+		ByUser: make(map[string]int),
 	}
+	var latestTimestamp string
 
+	mu.RLock()
 	for _, e := range events {
+		if !matchEventFilters(e, eventType, userID, since, until) {
+			continue
+		}
+		stats.TotalEvents++
 		stats.ByType[e.EventType]++
 		stats.ByUser[e.UserID]++
+		// 最新を時系列で正しく追跡する（後段の `events[len-1]` だと挿入順依存になり、
+		// フィルタ後の集合では誤った値になりやすい）。
+		if e.Timestamp > latestTimestamp {
+			latestTimestamp = e.Timestamp
+		}
 	}
+	mu.RUnlock()
+	stats.LastEventAt = latestTimestamp
 
-	if len(events) > 0 {
-		stats.LastEventAt = events[len(events)-1].Timestamp
-	}
-
-	log.Printf("Stats requested: %d total events", stats.TotalEvents)
+	log.Printf(
+		"Stats requested: total=%d event_type=%q user_id=%q since=%v until=%v",
+		stats.TotalEvents, eventType, userID, since, until,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
@@ -368,25 +437,8 @@ func listEventsHandler(w http.ResponseWriter, r *http.Request) {
 	mu.RLock()
 	filtered := make([]Event, 0, len(events))
 	for _, e := range events {
-		if eventType != "" && e.EventType != eventType {
+		if !matchEventFilters(e, eventType, userID, since, until) {
 			continue
-		}
-		if userID != "" && e.UserID != userID {
-			continue
-		}
-		if since != nil || until != nil {
-			// Event.Timestamp は RFC3339 文字列。フィルタが指定されている場合のみパースする。
-			// パース失敗時はストアの破損なので skip。
-			ts, terr := time.Parse(time.RFC3339, e.Timestamp)
-			if terr != nil {
-				continue
-			}
-			if since != nil && ts.Before(*since) {
-				continue
-			}
-			if until != nil && ts.After(*until) {
-				continue
-			}
 		}
 		filtered = append(filtered, e)
 	}
