@@ -777,3 +777,165 @@ func TestDeleteEvents_MethodNotAllowedStillWorks(t *testing.T) {
 		t.Fatalf("expected 405, got %d", w.Code)
 	}
 }
+
+// seedEvents は controlled timestamp で events を投入する。
+// trackHandler 経由だと time.Now() で上書きされるため、時間範囲テストではこちらを使う。
+func seedEvents(es []Event) {
+	mu.Lock()
+	for i := range es {
+		counter++
+		es[i].ID = fmt.Sprintf("evt_%d", counter)
+		events = append(events, es[i])
+	}
+	mu.Unlock()
+}
+
+func callStats(t *testing.T, query string) (*httptest.ResponseRecorder, StatsResponse) {
+	t.Helper()
+	url := "/api/analytics/stats"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	var resp StatsResponse
+	if w.Code == http.StatusOK {
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode stats: %v", err)
+		}
+	}
+	return w, resp
+}
+
+func TestStatsHandler_FilterByEventType(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u2", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-03T00:00:00Z"},
+	})
+	w, stats := callStats(t, "event_type=page_view")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.TotalEvents != 2 {
+		t.Fatalf("expected 2 page_view events, got %d", stats.TotalEvents)
+	}
+	if stats.ByType["click"] != 0 {
+		t.Fatalf("click should be filtered out, got %d", stats.ByType["click"])
+	}
+	if stats.LastEventAt != "2026-05-03T00:00:00Z" {
+		t.Fatalf("expected last_event_at 2026-05-03T00:00:00Z, got %q", stats.LastEventAt)
+	}
+}
+
+func TestStatsHandler_FilterByUserID(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u2", EventType: "page_view", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u1", EventType: "click", Timestamp: "2026-05-03T00:00:00Z"},
+	})
+	w, stats := callStats(t, "user_id=u1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.TotalEvents != 2 {
+		t.Fatalf("expected 2 events for u1, got %d", stats.TotalEvents)
+	}
+	if stats.ByUser["u2"] != 0 {
+		t.Fatalf("u2 should be filtered out, got %d", stats.ByUser["u2"])
+	}
+	if stats.ByType["page_view"] != 1 || stats.ByType["click"] != 1 {
+		t.Fatalf("unexpected by_type: %+v", stats.ByType)
+	}
+}
+
+func TestStatsHandler_FilterBySince(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-01-01T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-06-01T00:00:00Z"},
+	})
+	w, stats := callStats(t, "since=2026-04-01T00:00:00Z")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.TotalEvents != 2 {
+		t.Fatalf("expected 2 events on/after 2026-04-01, got %d", stats.TotalEvents)
+	}
+}
+
+func TestStatsHandler_FilterByUntil(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-01-01T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-06-01T00:00:00Z"},
+	})
+	w, stats := callStats(t, "until=2026-05-01T00:00:00Z")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.TotalEvents != 2 {
+		t.Fatalf("expected 2 events on/before 2026-05-01, got %d", stats.TotalEvents)
+	}
+}
+
+func TestStatsHandler_FilterCombined(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u1", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u2", EventType: "page_view", Timestamp: "2026-05-03T00:00:00Z"},
+	})
+	w, stats := callStats(t, "user_id=u1&event_type=page_view")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.TotalEvents != 1 {
+		t.Fatalf("expected 1 event matching both filters, got %d", stats.TotalEvents)
+	}
+	if stats.ByType["click"] != 0 || stats.ByUser["u2"] != 0 {
+		t.Fatalf("unexpected aggregates: %+v / %+v", stats.ByType, stats.ByUser)
+	}
+}
+
+func TestStatsHandler_InvalidSinceReturns400(t *testing.T) {
+	resetState()
+	w, _ := callStats(t, "since=not-a-date")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bogus since, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !strings.Contains(resp["error"], "since") {
+		t.Fatalf("expected error to mention 'since', got %q", resp["error"])
+	}
+}
+
+func TestStatsHandler_SinceGreaterThanUntilReturns400(t *testing.T) {
+	resetState()
+	w, _ := callStats(t, "since=2026-06-01T00:00:00Z&until=2026-05-01T00:00:00Z")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for since > until, got %d", w.Code)
+	}
+}
+
+func TestStatsHandler_NoFilterReturnsAll(t *testing.T) {
+	// 後方互換性: フィルタ未指定時は従来通り全件集計
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u2", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+	})
+	w, stats := callStats(t, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.TotalEvents != 2 {
+		t.Fatalf("expected 2 total, got %d", stats.TotalEvents)
+	}
+}
