@@ -288,3 +288,183 @@ describe("GET /api/notifications/:id", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("GET /api/notifications since/until time-range filter", () => {
+  beforeEach(() => {
+    clearNotifications();
+  });
+
+  // テストは送信時刻（UTC ISO）を直接使うのではなく、POST 直前/直後の
+  // 現在時刻を `since`/`until` に渡して挙動を検証する。
+  const send = (overrides: Record<string, unknown> = {}) =>
+    request(app)
+      .post("/api/notifications/send")
+      .send({
+        user_id: "u1",
+        channel: "email",
+        title: "T",
+        message: "M",
+        ...overrides,
+      });
+
+  it("filters by since (inclusive lower bound)", async () => {
+    await send({ title: "before" });
+    // since にこの直後の時刻を使うため、ms 単位で安定するよう少し進めた値を用意
+    const cutoff = new Date(Date.now() + 1).toISOString();
+    // 後続を送ってから since=cutoff で絞る → 後続のみ
+    await new Promise((r) => setTimeout(r, 10));
+    await send({ title: "after-1" });
+    await send({ title: "after-2" });
+    const res = await request(app).get(
+      `/api/notifications?since=${encodeURIComponent(cutoff)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.every((n: { title: string }) => n.title.startsWith("after"))).toBe(true);
+  });
+
+  it("filters by until (inclusive upper bound)", async () => {
+    await send({ title: "before-1" });
+    await send({ title: "before-2" });
+    await new Promise((r) => setTimeout(r, 10));
+    const cutoff = new Date(Date.now()).toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+    await send({ title: "after-1" });
+    const res = await request(app).get(
+      `/api/notifications?until=${encodeURIComponent(cutoff)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.every((n: { title: string }) => n.title.startsWith("before"))).toBe(true);
+  });
+
+  it("filters by since and until combined", async () => {
+    await send({ title: "early" });
+    await new Promise((r) => setTimeout(r, 10));
+    const lo = new Date(Date.now()).toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+    await send({ title: "middle" });
+    await new Promise((r) => setTimeout(r, 10));
+    const hi = new Date(Date.now()).toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+    await send({ title: "late" });
+    const res = await request(app).get(
+      `/api/notifications?since=${encodeURIComponent(lo)}&until=${encodeURIComponent(hi)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].title).toBe("middle");
+  });
+
+  it("rejects invalid since with 400", async () => {
+    const res = await request(app).get("/api/notifications?since=not-a-date");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("since");
+  });
+
+  it("rejects invalid until with 400", async () => {
+    const res = await request(app).get("/api/notifications?until=foo");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("until");
+  });
+
+  it("rejects blank since with 400", async () => {
+    const res = await request(app).get("/api/notifications?since=%20%20%20");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("blank");
+  });
+
+  it("rejects since > until with 400", async () => {
+    const res = await request(app).get(
+      "/api/notifications?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("until");
+  });
+
+  it("accepts Z-suffixed UTC timestamps", async () => {
+    // 過去日時を since にすれば全件マッチ
+    await send({ title: "x" });
+    const res = await request(app).get(
+      "/api/notifications?since=2000-01-01T00:00:00Z"
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
+});
+
+describe("GET /api/notifications/summary", () => {
+  beforeEach(() => {
+    clearNotifications();
+  });
+
+  const send = (channel: "email" | "sms" | "push", user_id = "u1") =>
+    request(app).post("/api/notifications/send").send({
+      user_id,
+      channel,
+      title: "T",
+      message: "M",
+    });
+
+  it("returns zero counts when the store is empty", async () => {
+    const res = await request(app).get("/api/notifications/summary");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(0);
+    expect(res.body.by_channel).toEqual({ email: 0, sms: 0, push: 0 });
+    expect(res.body.by_status).toEqual({ pending: 0, sent: 0, failed: 0 });
+  });
+
+  it("aggregates by channel and status", async () => {
+    await send("email");
+    await send("email");
+    await send("sms");
+    await send("push");
+    const res = await request(app).get("/api/notifications/summary");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(4);
+    expect(res.body.by_channel).toEqual({ email: 2, sms: 1, push: 1 });
+    // POST 時点では status="sent" のみ
+    expect(res.body.by_status).toEqual({ pending: 0, sent: 4, failed: 0 });
+  });
+
+  it("respects user_id filter", async () => {
+    await send("email", "u1");
+    await send("email", "u1");
+    await send("sms", "u2");
+    const res = await request(app).get("/api/notifications/summary?user_id=u1");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.by_channel.email).toBe(2);
+    expect(res.body.by_channel.sms).toBe(0);
+  });
+
+  it("respects channel filter", async () => {
+    await send("email");
+    await send("sms");
+    await send("push");
+    const res = await request(app).get("/api/notifications/summary?channel=email");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.by_channel).toEqual({ email: 1, sms: 0, push: 0 });
+  });
+
+  it("rejects invalid channel filter with 400", async () => {
+    const res = await request(app).get("/api/notifications/summary?channel=bogus");
+    expect(res.status).toBe(400);
+  });
+
+  it("respects since/until filters", async () => {
+    await send("email");
+    await new Promise((r) => setTimeout(r, 10));
+    const cutoff = new Date(Date.now()).toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+    await send("sms");
+    const res = await request(app).get(
+      `/api/notifications/summary?since=${encodeURIComponent(cutoff)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.by_channel.sms).toBe(1);
+    expect(res.body.by_channel.email).toBe(0);
+  });
+});
