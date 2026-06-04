@@ -1,4 +1,4 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 
@@ -14,9 +14,33 @@ export interface Notification {
 
 const notifications: Notification[] = [];
 
+// 1 プロセスで保持する通知の最大件数。0 以下なら無制限。
+// 長時間稼働で in-memory store がメモリを無制限に占有するのを防ぐ。
+function parseMaxNotifications(): number {
+  const raw = process.env.MAX_NOTIFICATIONS;
+  if (raw === undefined) return 10000;
+  if (!/^-?\d+$/.test(raw)) {
+    // 不正値はデフォルトにフォールバック（プロセスは継続）
+    return 10000;
+  }
+  return parseInt(raw, 10);
+}
+// 起動時の cap。テスト時のみ `setMaxNotifications` で動的に上書きできる。
+let maxNotifications = parseMaxNotifications();
+export function setMaxNotifications(n: number): void {
+  maxNotifications = n;
+}
+export function getMaxNotifications(): number {
+  return maxNotifications;
+}
+
+// JSON ペイロードの最大サイズ。明示しないと express.json の既定 100kb で動くため、
+// 環境変数で上書きできる形で明示する。
+const MAX_REQUEST_BODY = process.env.MAX_REQUEST_BODY || "256kb";
+
 export const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: MAX_REQUEST_BODY }));
 
 const log = (level: string, msg: string) => {
   const ts = new Date().toISOString();
@@ -59,6 +83,16 @@ app.post("/api/notifications/send", (req: Request, res: Response) => {
   };
 
   notifications.push(notification);
+  // FIFO eviction: 上限を超えたら先頭から破棄する。
+  // 0 以下は無制限扱い（テスト用に環境変数で完全無効化できる）。
+  if (maxNotifications > 0 && notifications.length > maxNotifications) {
+    const overflow = notifications.length - maxNotifications;
+    notifications.splice(0, overflow);
+    log(
+      "INFO",
+      `Evicted ${overflow} old notification(s) (cap=${maxNotifications})`,
+    );
+  }
   log("INFO", `Notification sent: id=${notification.id} channel=${channel} user=${user_id}`);
   res.status(201).json(notification);
 });
@@ -329,9 +363,31 @@ app.get("/api/notifications/:id", (req: Request, res: Response) => {
   res.json(notification);
 });
 
+// express.json の limit 超過は SyntaxError ではなく entity.too.large になる。
+// 既定の Express エラーハンドラに任せると HTML を返してしまうため、
+// JSON で 413 を返す専用ハンドラをアプリ末尾に登録する。
+app.use(
+  (
+    err: Error & { type?: string; status?: number; statusCode?: number },
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    const status = err.status ?? err.statusCode;
+    if (err && (err.type === "entity.too.large" || status === 413)) {
+      log("WARN", `Request body too large (limit=${MAX_REQUEST_BODY})`);
+      res.status(413).json({ error: "request body too large" });
+      return;
+    }
+    next(err);
+  },
+);
+
 export function clearNotifications() {
   notifications.length = 0;
 }
+
+export { MAX_REQUEST_BODY };
 
 if (require.main === module) {
   const port = parseInt(process.env.NOTIFICATION_PORT || "5003", 10);

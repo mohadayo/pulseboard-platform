@@ -1,5 +1,10 @@
 import request from "supertest";
-import { app, clearNotifications } from "./index";
+import {
+  app,
+  clearNotifications,
+  getMaxNotifications,
+  setMaxNotifications,
+} from "./index";
 
 beforeEach(() => {
   clearNotifications();
@@ -466,5 +471,69 @@ describe("GET /api/notifications/summary", () => {
     expect(res.body.total).toBe(1);
     expect(res.body.by_channel.sms).toBe(1);
     expect(res.body.by_channel.email).toBe(0);
+  });
+});
+
+describe("In-memory store cap (MAX_NOTIFICATIONS)", () => {
+  const ORIGINAL_CAP = getMaxNotifications();
+  afterEach(() => {
+    setMaxNotifications(ORIGINAL_CAP);
+  });
+
+  async function send(userId: string): Promise<void> {
+    await request(app).post("/api/notifications/send").send({
+      user_id: userId,
+      channel: "email",
+      title: "t",
+      message: "m",
+    });
+  }
+
+  it("evicts oldest entries when cap is exceeded (FIFO)", async () => {
+    setMaxNotifications(3);
+    await send("u1");
+    await send("u2");
+    await send("u3");
+    await send("u4");
+
+    const res = await request(app).get("/api/notifications");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(3);
+    // FIFO: u1 が落ち、残るのは u2/u3/u4
+    expect(res.body.map((n: { user_id: string }) => n.user_id)).toEqual([
+      "u2",
+      "u3",
+      "u4",
+    ]);
+  });
+
+  it("keeps everything when cap is 0 (unlimited)", async () => {
+    setMaxNotifications(0);
+    for (let i = 0; i < 5; i += 1) {
+      await send(`u${i}`);
+    }
+    const res = await request(app).get("/api/notifications");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(5);
+  });
+});
+
+describe("JSON body size limit", () => {
+  it("returns 413 with JSON body when POST body exceeds the configured limit", async () => {
+    // 既定 256kb を確実に超える 512KB の payload を組み立てる。
+    const huge = "a".repeat(512 * 1024);
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .set("Content-Type", "application/json")
+      .send({ user_id: "u", channel: "email", title: "t", message: huge });
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe("request body too large");
+  });
+
+  it("accepts a small JSON POST under the limit (201)", async () => {
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .send({ user_id: "u", channel: "email", title: "t", message: "m" });
+    expect(res.status).toBe(201);
   });
 });
