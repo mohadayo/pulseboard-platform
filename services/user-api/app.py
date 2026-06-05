@@ -202,6 +202,66 @@ def _normalize_q(raw):
     return stripped.lower(), None
 
 
+@app.route("/api/users/me/password", methods=["POST"])
+def change_password():
+    """ログイン中ユーザの現行 / 新規パスワードを受け取り、ハッシュを更新する。
+
+    既存 `/api/users/me` と同様に `Authorization: Bearer <JWT>` を検証し、
+    `current_password` が現在の保存ハッシュと一致した場合のみ `new_password`
+    のハッシュで上書きする。`new_password` には登録時と同じ最低長
+    (`MIN_PASSWORD_LENGTH`) を要求し、変更前と完全一致する `new_password` は
+    400 で明示拒否する（誤操作・無意味なリセットを早期にユーザへ伝えるため）。
+
+    返り値は `{"updated": true}` のみで、パスワード本体はログにもレスポンスにも
+    含めない。既存 JWT は失効させない（本サービスにトークン無効化機構が無く、
+    必要なら refresh エンドポイント追加を別 Issue で扱う）。
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Authorization header required"}), 401
+
+    try:
+        payload = jwt.decode(auth_header[7:], SECRET_KEY, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid token"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "current_password and new_password are required"}), 400
+
+    current_raw = data.get("current_password")
+    new_raw = data.get("new_password")
+    if current_raw is None or new_raw is None:
+        return jsonify({"error": "current_password and new_password are required"}), 400
+    if not isinstance(current_raw, str) or not isinstance(new_raw, str):
+        return jsonify({"error": "current_password and new_password must be strings"}), 400
+
+    email = payload.get("email")
+    user = users_db.get(email)
+    if not user:
+        # トークンは valid だが、登録ユーザが削除されている等の状況。
+        logger.warning("Password change for missing user: %s", email)
+        return jsonify({"error": "User not found"}), 404
+
+    if user["password"] != hash_password(current_raw):
+        logger.warning("Password change with wrong current password: %s", email)
+        return jsonify({"error": "Current password is incorrect"}), 401
+
+    if len(new_raw) < MIN_PASSWORD_LENGTH:
+        return jsonify(
+            {"error": f"new_password must be at least {MIN_PASSWORD_LENGTH} characters"},
+        ), 400
+
+    if new_raw == current_raw:
+        return jsonify({"error": "new_password must differ from current_password"}), 400
+
+    user["password"] = hash_password(new_raw)
+    logger.info("User changed password: %s", email)
+    return jsonify({"updated": True})
+
+
 @app.route("/api/users", methods=["GET"])
 def list_users():
     limit = _parse_pagination_param(request.args.get("limit"), USERS_DEFAULT_LIMIT, 1, USERS_MAX_LIMIT)
