@@ -337,3 +337,161 @@ def test_list_users_with_q_does_not_500_after_register(client):
     data = resp.get_json()
     assert data["total"] == 1
     assert data["users"][0]["email"] == "valid@example.com"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/users/me/password — パスワード変更
+# ---------------------------------------------------------------------------
+
+
+def _register_and_login(client, email="a@b.com", password="pass123", name="Alice"):
+    client.post("/api/users/register", json={
+        "email": email, "password": password, "name": name,
+    })
+    resp = client.post("/api/users/login", json={"email": email, "password": password})
+    return resp.get_json()["token"]
+
+
+def test_change_password_success(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123", "new_password": "newpass456"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"updated": True}
+
+    # 旧パスワードではログインできない
+    bad = client.post("/api/users/login", json={"email": "a@b.com", "password": "pass123"})
+    assert bad.status_code == 401
+    # 新パスワードではログインできる
+    ok = client.post("/api/users/login", json={"email": "a@b.com", "password": "newpass456"})
+    assert ok.status_code == 200
+
+
+def test_change_password_no_auth(client):
+    resp = client.post(
+        "/api/users/me/password",
+        json={"current_password": "pass123", "new_password": "newpass456"},
+    )
+    assert resp.status_code == 401
+
+
+def test_change_password_invalid_token(client):
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": "Bearer invalidtoken"},
+        json={"current_password": "pass123", "new_password": "newpass456"},
+    )
+    assert resp.status_code == 401
+
+
+def test_change_password_missing_body(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_change_password_missing_current(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"new_password": "newpass456"},
+    )
+    assert resp.status_code == 400
+
+
+def test_change_password_missing_new(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123"},
+    )
+    assert resp.status_code == 400
+
+
+def test_change_password_non_string_current(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": 12345, "new_password": "newpass456"},
+    )
+    assert resp.status_code == 400
+
+
+def test_change_password_non_string_new(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123", "new_password": 99999},
+    )
+    assert resp.status_code == 400
+
+
+def test_change_password_wrong_current(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "wrongpass", "new_password": "newpass456"},
+    )
+    assert resp.status_code == 401
+    assert "Current password" in resp.get_json()["error"]
+
+
+def test_change_password_new_too_short(client):
+    token = _register_and_login(client)
+    # MIN_PASSWORD_LENGTH=6 が既定なので 5 文字以下は拒否される
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123", "new_password": "abc"},
+    )
+    assert resp.status_code == 400
+    assert "at least" in resp.get_json()["error"]
+
+
+def test_change_password_new_same_as_current(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123", "new_password": "pass123"},
+    )
+    assert resp.status_code == 400
+    assert "differ" in resp.get_json()["error"]
+
+
+def test_change_password_user_not_found(client):
+    # 一度ログインしてトークンを得てから、users_db からユーザを削除する。
+    token = _register_and_login(client)
+    users_db.clear()
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123", "new_password": "newpass456"},
+    )
+    assert resp.status_code == 404
+
+
+def test_change_password_does_not_leak_password_in_response(client):
+    token = _register_and_login(client)
+    resp = client.post(
+        "/api/users/me/password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123", "new_password": "newpass456"},
+    )
+    body = resp.get_json()
+    # レスポンスに password / new_password などのフィールドが含まれていないこと
+    assert "password" not in body
+    assert "current_password" not in body
+    assert "new_password" not in body
+    assert "hash" not in body
