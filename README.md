@@ -100,6 +100,8 @@ curl -X POST http://localhost:5001/api/users/login \
 | POST | `/api/analytics/track` | Track an event |
 | GET | `/api/analytics/stats` | Get aggregated statistics |
 | GET | `/api/analytics/events` | List all events |
+| GET | `/api/analytics/events/{id}` | Get a single event by id (404 if not found) |
+| DELETE | `/api/analytics/events` | Delete events by `user_id` / `event_type` / `before` filters |
 
 **Track Event:**
 ```bash

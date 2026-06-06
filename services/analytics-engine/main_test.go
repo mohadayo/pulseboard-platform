@@ -939,3 +939,175 @@ func TestStatsHandler_NoFilterReturnsAll(t *testing.T) {
 		t.Fatalf("expected 2 total, got %d", stats.TotalEvents)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/analytics/events/{id} — 単一イベント取得
+// ---------------------------------------------------------------------------
+
+func TestGetEventByID_Success(t *testing.T) {
+	resetState()
+	// track 経由で投入すると ID/Timestamp が割り当てられる
+	body, _ := json.Marshal(map[string]string{
+		"user_id":    "u1",
+		"event_type": "signup",
+		"payload":    "free_trial",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/track", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	trackHandler(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seed failed: %d", w.Code)
+	}
+	var created Event
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/analytics/events/" + created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var got Event
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("expected id=%s, got %s", created.ID, got.ID)
+	}
+	if got.EventType != "signup" || got.UserID != "u1" || got.Payload != "free_trial" {
+		t.Fatalf("event fields mismatch: %+v", got)
+	}
+	if got.Timestamp == "" {
+		t.Fatalf("timestamp must be preserved")
+	}
+}
+
+func TestGetEventByID_NotFound(t *testing.T) {
+	resetState()
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/analytics/events/evt_does_not_exist")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body["error"], "evt_does_not_exist") {
+		t.Fatalf("error should mention id, got: %v", body)
+	}
+}
+
+func TestGetEventByID_MethodNotAllowed(t *testing.T) {
+	resetState()
+	seedEvents([]Event{{ID: "evt_1", UserID: "u1", EventType: "click", Timestamp: "2026-05-01T00:00:00Z"}})
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	// router 経由で POST すると、Go 1.22 の "GET ..." パターン非マッチで 405 になる
+	resp, err := http.Post(
+		srv.URL+"/api/analytics/events/evt_1",
+		"application/json",
+		strings.NewReader(`{}`),
+	)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetEventByID_DoesNotCollideWithListRoute(t *testing.T) {
+	// `/api/analytics/events`（一覧）と `/api/analytics/events/{id}`（単発）は
+	// ルータレベルで別パターンとして登録されており、互いに干渉しないこと。
+	resetState()
+	body, _ := json.Marshal(map[string]string{"user_id": "u1", "event_type": "click"})
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/track", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	trackHandler(w, req)
+	var created Event
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	// 一覧側は配列 (events) を含む JSON を返す
+	listResp, err := http.Get(srv.URL + "/api/analytics/events")
+	if err != nil {
+		t.Fatalf("get list: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from list, got %d", listResp.StatusCode)
+	}
+	var listBody map[string]interface{}
+	if err := json.NewDecoder(listResp.Body).Decode(&listBody); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if _, ok := listBody["events"]; !ok {
+		t.Fatalf("list response must contain 'events' field, got: %v", listBody)
+	}
+
+	// 単発側は Event 形状（events 配列を持たない）
+	detailResp, err := http.Get(srv.URL + "/api/analytics/events/" + created.ID)
+	if err != nil {
+		t.Fatalf("get detail: %v", err)
+	}
+	defer detailResp.Body.Close()
+	if detailResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from detail, got %d", detailResp.StatusCode)
+	}
+	var detailBody map[string]interface{}
+	if err := json.NewDecoder(detailResp.Body).Decode(&detailBody); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if _, ok := detailBody["events"]; ok {
+		t.Fatalf("detail response must NOT contain 'events' field, got: %v", detailBody)
+	}
+	if detailBody["id"] != created.ID {
+		t.Fatalf("detail id mismatch: %v", detailBody)
+	}
+}
+
+func TestGetEventByID_DirectHandlerWrongMethod(t *testing.T) {
+	// ルータを通さず直接 getEventByIDHandler を非 GET で叩いた場合の 405 挙動を確認する。
+	// 拡張ルーティングのメソッドゲートに頼らない明示的な防御を回帰する。
+	resetState()
+	req := httptest.NewRequest(http.MethodDelete, "/api/analytics/events/evt_1", nil)
+	req.SetPathValue("id", "evt_1")
+	w := httptest.NewRecorder()
+	getEventByIDHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestGetEventByID_BlankIDReturns404(t *testing.T) {
+	// 通常のルータ経由では `{id}` セグメントが空にはならないが、
+	// 直接ハンドラを呼ぶテストでブランク id の 400 ガードを回帰する。
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events/", nil)
+	req.SetPathValue("id", "   ")
+	w := httptest.NewRecorder()
+	getEventByIDHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for blank id, got %d", w.Code)
+	}
+}

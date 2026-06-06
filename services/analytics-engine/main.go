@@ -494,6 +494,43 @@ func listEventsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// getEventByIDHandler は GET /api/analytics/events/{id} を処理し、id 完全一致の
+// 1 件を返す。該当なしは 404 を JSON で返す。Go 1.22 の拡張ルーティングで
+// `{id}` セグメントを取り出すため、http.ServeMux の `GET /...` パターンで登録する。
+// メソッドは GET のみ。誤って他メソッドで叩かれた場合に備え、明示的に 405 を返す
+// （拡張ルーティングは "GET ..." パターンで他メソッドを 405 にしてくれるが、
+// 直接ハンドラを呼ぶテストに対しても挙動を揃えるため冗長に検査する）。
+func getEventByIDHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSONError(w, http.StatusBadRequest, "id must not be blank")
+		return
+	}
+	mu.RLock()
+	var found *Event
+	for i := range events {
+		if events[i].ID == id {
+			// コピーを保持してロック外で安全に Encode する。
+			e := events[i]
+			found = &e
+			break
+		}
+	}
+	mu.RUnlock()
+	if found == nil {
+		log.Printf("Event not found: id=%s", id)
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("event %q not found", id))
+		return
+	}
+	log.Printf("Event retrieved: id=%s type=%s user=%s", found.ID, found.EventType, found.UserID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(found)
+}
+
 // newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
 func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -501,6 +538,10 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/api/analytics/track", trackHandler)
 	mux.HandleFunc("/api/analytics/stats", statsHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
+	// 単一イベント取得。Go 1.22 の拡張ルーティングで {id} を取り出す。
+	// `/api/analytics/events`（一覧/削除）と `/api/analytics/events/{id}`（単発）は
+	// パターンとして異なるため衝突しない。
+	mux.HandleFunc("GET /api/analytics/events/{id}", getEventByIDHandler)
 	return mux
 }
 
