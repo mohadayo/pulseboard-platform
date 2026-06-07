@@ -182,6 +182,36 @@ def get_current_user():
     return jsonify({"id": user["id"], "email": user["email"], "name": user["name"], "created_at": user["created_at"]})
 
 
+def _parse_iso_datetime(raw, field):
+    """`raw` を ISO 8601 文字列としてパースして UTC `datetime` に正規化する。
+
+    `Z` 末尾は `+00:00` に置換してから `datetime.fromisoformat` に渡す。
+    タイムゾーン無指定（naive）の入力は UTC として扱う（`created_at` も
+    `datetime.now(timezone.utc).isoformat()` で書き込んでおり、UTC 同士の
+    比較になるため）。
+
+    戻り値は `(datetime|None, error_msg|None)`。
+    - 未指定 (`None` または空白のみ): `(None, None)` — フィルタしない
+    - パース失敗: `(None, "...")` — 呼び出し側で 400 を返す対象
+    - 正常: `(datetime, None)`
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, f"{field} must be a string"
+    stripped = raw.strip()
+    if not stripped:
+        return None, None
+    normalized = stripped[:-1] + "+00:00" if stripped.endswith("Z") else stripped
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None, f"{field} must be an ISO 8601 datetime"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed, None
+
+
 def _normalize_q(raw):
     """`q` パラメータを正規化する。
 
@@ -278,6 +308,21 @@ def list_users():
         logger.warning("Invalid q: %s", q_err)
         return jsonify({"error": q_err}), 400
 
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
     sort_field = request.args.get("sort", "created_at")
     if sort_field not in ALLOWED_USER_SORT_FIELDS:
         logger.warning("Invalid sort field: %s", sort_field)
@@ -298,6 +343,21 @@ def list_users():
             name_l = (u.get("name") or "").lower()
             if q not in email_l and q not in name_l:
                 continue
+        if since_dt is not None or until_dt is not None:
+            created_raw = u.get("created_at")
+            if not isinstance(created_raw, str):
+                # 壊れた created_at は時間フィルタ指定時に取り除く（保険）
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt < since_dt:
+                continue
+            if until_dt is not None and created_dt > until_dt:
+                continue
         matched.append(u)
 
     reverse = sort_order == "desc"
@@ -314,11 +374,13 @@ def list_users():
         }
         for u in page_records
     ]
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
     logger.info(
-        "Listing users: %d returned (total=%d limit=%d offset=%d q=%s sort=%s order=%s)",
-        len(page), total, limit, offset, q, sort_field, sort_order,
+        "Listing users: %d returned (total=%d limit=%d offset=%d q=%s sort=%s order=%s since=%s until=%s)",
+        len(page), total, limit, offset, q, sort_field, sort_order, since_raw, until_raw,
     )
-    return jsonify({
+    resp = {
         "users": page,
         "count": len(page),
         "total": total,
@@ -326,7 +388,13 @@ def list_users():
         "offset": offset,
         "sort": sort_field,
         "order": sort_order,
-    })
+    }
+    # 指定されたときだけエコーする（未指定時の互換性のため None フィールドは含めない）
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
 
 
 if __name__ == "__main__":

@@ -249,6 +249,123 @@ def test_list_users_negative_offset(client):
     assert resp.status_code == 400
 
 
+def _register_user_with_created_at(email: str, created_at: str) -> None:
+    """`users_db` 直接書き込みで `created_at` を制御するヘルパ。
+
+    POST /api/users/register は `created_at` を `now(UTC)` で書き込むため、
+    過去日時のレコードを再現したい時系列フィルタテストではここで上書きする。
+    """
+    users_db[email] = {
+        "id": f"id-{email}",
+        "email": email,
+        "password": "x",
+        "name": email.split("@")[0].capitalize(),
+        "created_at": created_at,
+    }
+
+
+def test_list_users_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-01T00:00:00+00:00")
+
+    resp = client.get("/api/users?since=2024-03-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    emails = sorted(u["email"] for u in data["users"])
+    assert emails == ["new@example.com"]
+    assert data["total"] == 1
+    assert data["since"] == "2024-03-01T00:00:00Z"
+
+
+def test_list_users_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-01T00:00:00+00:00")
+
+    resp = client.get("/api/users?until=2024-03-01T00:00:00Z")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    emails = sorted(u["email"] for u in data["users"])
+    assert emails == ["old@example.com"]
+    assert data["total"] == 1
+    assert data["until"] == "2024-03-01T00:00:00Z"
+
+
+def test_list_users_filters_by_since_and_until(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-06-15T00:00:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-12-01T00:00:00+00:00")
+
+    resp = client.get(
+        "/api/users?since=2024-03-01T00:00:00Z&until=2024-09-01T00:00:00Z",
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    emails = sorted(u["email"] for u in data["users"])
+    assert emails == ["b@example.com"]
+    assert data["since"] == "2024-03-01T00:00:00Z"
+    assert data["until"] == "2024-09-01T00:00:00Z"
+
+
+def test_list_users_since_combines_with_q(client):
+    _register_user_with_created_at("old.web@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new.web@example.com", "2024-12-01T00:00:00+00:00")
+    _register_user_with_created_at("new.db@example.com", "2024-12-01T00:00:00+00:00")
+
+    resp = client.get("/api/users?since=2024-06-01T00:00:00Z&q=web")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    emails = sorted(u["email"] for u in data["users"])
+    assert emails == ["new.web@example.com"]
+
+
+def test_list_users_invalid_since(client):
+    resp = client.get("/api/users?since=not-a-date")
+    assert resp.status_code == 400
+    assert "since" in resp.get_json()["error"]
+
+
+def test_list_users_invalid_until(client):
+    resp = client.get("/api/users?until=2024-13-99")
+    assert resp.status_code == 400
+    assert "until" in resp.get_json()["error"]
+
+
+def test_list_users_since_after_until_is_400(client):
+    resp = client.get(
+        "/api/users?since=2024-09-01T00:00:00Z&until=2024-03-01T00:00:00Z",
+    )
+    assert resp.status_code == 400
+    assert "less than or equal" in resp.get_json()["error"]
+
+
+def test_list_users_since_without_timezone_treated_as_utc(client):
+    _register_user_with_created_at("a@example.com", "2024-06-15T00:00:00+00:00")
+    # タイムゾーン無指定は UTC として扱われ、2024-01-01 以降は a を含む
+    resp = client.get("/api/users?since=2024-01-01T00:00:00")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    emails = sorted(u["email"] for u in data["users"])
+    assert emails == ["a@example.com"]
+
+
+def test_list_users_does_not_echo_since_when_unspecified(client):
+    # 未指定なら since / until フィールドはレスポンスに含めない（互換性のため）
+    resp = client.get("/api/users")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "since" not in data
+    assert "until" not in data
+
+
+def test_list_users_blank_since_is_ignored(client):
+    # 空白のみの since はフィルタ無効（後方互換）
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users?since=%20%20")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 1
+
+
 def test_register_rejects_non_string_name(client):
     # name に数値を渡しても 201 で受理されると、後段の GET /api/users が
     # `name.lower()` で 500 する。明示的に 400 で拒否する。

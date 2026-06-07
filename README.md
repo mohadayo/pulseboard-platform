@@ -72,7 +72,7 @@ npm run dev
 | POST | `/api/users/register` | Register a new user |
 | POST | `/api/users/login` | Login and receive JWT |
 | GET | `/api/users/me` | Get current user profile (requires JWT) |
-| GET | `/api/users` | List users (pagination: `?limit=&offset=`) |
+| GET | `/api/users` | List users（`?limit=` / `?offset=` ページネーション、`?q=` 部分一致、`?sort=` `?order=`、`?since=` / `?until=` で `created_at` の ISO 8601 範囲フィルタ） |
 
 > Email addresses are normalized (trimmed + lowercased) on register/login, so
 > `Foo@x.com` and `foo@x.com` map to the same account. Registration validates
