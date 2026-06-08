@@ -352,6 +352,65 @@ app.get("/api/notifications/summary", (req: Request, res: Response) => {
   });
 });
 
+// 指定フィルタに一致する通知を一括削除する。
+// 誤った全件削除を防ぐため、`user_id` / `channel` / `status` / `since` / `until`
+// の少なくとも 1 つを必須にする（analytics-engine の deleteEventsHandler と同じ規約）。
+// GET と同じ `parseListFilters` を再利用するため、バリデーション挙動・エラーメッセージは
+// 完全に一致する。
+app.delete("/api/notifications", (req: Request, res: Response) => {
+  const parsed = parseListFilters(req);
+  if (!parsed.ok) {
+    log("WARN", `Invalid delete filter: ${parsed.error}`);
+    res.status(parsed.status).json({ error: parsed.error });
+    return;
+  }
+
+  const hasAnyFilter =
+    parsed.userId !== undefined ||
+    parsed.channel !== undefined ||
+    parsed.status !== undefined ||
+    parsed.since !== undefined ||
+    parsed.until !== undefined;
+  if (!hasAnyFilter) {
+    log("WARN", "Delete attempt without any filter");
+    res.status(400).json({
+      error:
+        "at least one of 'user_id', 'channel', 'status', 'since', or 'until' must be provided",
+    });
+    return;
+  }
+
+  const before = notifications.length;
+  // 末尾から走査して splice することで、削除中の index 衝突を避ける。
+  for (let i = notifications.length - 1; i >= 0; i--) {
+    const n = notifications[i];
+    if (parsed.userId !== undefined && n.user_id !== parsed.userId) continue;
+    if (parsed.channel !== undefined && n.channel !== parsed.channel) continue;
+    if (parsed.status !== undefined && n.status !== parsed.status) continue;
+    if (parsed.since !== undefined || parsed.until !== undefined) {
+      const ts = new Date(n.created_at);
+      // 破損した created_at は誤削除回避のため対象外とする
+      if (Number.isNaN(ts.getTime())) continue;
+      if (parsed.since !== undefined && ts < parsed.since) continue;
+      if (parsed.until !== undefined && ts > parsed.until) continue;
+    }
+    notifications.splice(i, 1);
+  }
+  const deleted = before - notifications.length;
+  log(
+    "INFO",
+    `Notifications deleted: count=${deleted} user_id=${parsed.userId ?? "-"} channel=${parsed.channel ?? "-"} status=${parsed.status ?? "-"}`,
+  );
+  res.json({
+    deleted,
+    user_id: parsed.userId ?? null,
+    channel: parsed.channel ?? null,
+    status: parsed.status ?? null,
+    since: parsed.since ? parsed.since.toISOString() : null,
+    until: parsed.until ? parsed.until.toISOString() : null,
+  });
+});
+
 app.get("/api/notifications/:id", (req: Request, res: Response) => {
   const notification = notifications.find((n) => n.id === req.params.id);
   if (!notification) {
