@@ -537,3 +537,175 @@ describe("JSON body size limit", () => {
     expect(res.status).toBe(201);
   });
 });
+
+describe("DELETE /api/notifications", () => {
+  async function seedNotification(
+    user_id: string,
+    channel: "email" | "sms" | "push",
+    title = "t",
+    message = "m",
+  ): Promise<string> {
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .send({ user_id, channel, title, message });
+    return res.body.id as string;
+  }
+
+  it("requires at least one filter", async () => {
+    await seedNotification("u1", "email");
+    const res = await request(app).delete("/api/notifications");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("at least one of");
+    // 通知は削除されていないこと
+    const list = await request(app).get("/api/notifications");
+    expect(list.body).toHaveLength(1);
+  });
+
+  it("deletes by user_id", async () => {
+    await seedNotification("u1", "email");
+    await seedNotification("u1", "sms");
+    await seedNotification("u2", "email");
+    const res = await request(app).delete("/api/notifications?user_id=u1");
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(2);
+    expect(res.body.user_id).toBe("u1");
+    expect(res.body.channel).toBeNull();
+    expect(res.body.status).toBeNull();
+
+    const list = await request(app).get("/api/notifications");
+    expect(list.body).toHaveLength(1);
+    expect(list.body[0].user_id).toBe("u2");
+  });
+
+  it("deletes by channel", async () => {
+    await seedNotification("u1", "email");
+    await seedNotification("u1", "sms");
+    await seedNotification("u2", "email");
+    const res = await request(app).delete("/api/notifications?channel=email");
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(2);
+    expect(res.body.channel).toBe("email");
+
+    const list = await request(app).get("/api/notifications");
+    expect(list.body).toHaveLength(1);
+    expect(list.body[0].channel).toBe("sms");
+  });
+
+  it("deletes by status", async () => {
+    // 全 POST は status='sent' で作成されるため、status=failed では削除 0 件
+    await seedNotification("u1", "email");
+    const noMatch = await request(app).delete(
+      "/api/notifications?status=failed",
+    );
+    expect(noMatch.status).toBe(200);
+    expect(noMatch.body.deleted).toBe(0);
+
+    const match = await request(app).delete("/api/notifications?status=sent");
+    expect(match.status).toBe(200);
+    expect(match.body.deleted).toBe(1);
+    expect(match.body.status).toBe("sent");
+  });
+
+  it("combines filters with AND semantics", async () => {
+    await seedNotification("u1", "email");
+    await seedNotification("u1", "sms");
+    await seedNotification("u2", "email");
+    // user_id=u1 AND channel=email → 1 件のみ削除
+    const res = await request(app).delete(
+      "/api/notifications?user_id=u1&channel=email",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(1);
+
+    const list = await request(app).get("/api/notifications");
+    expect(list.body).toHaveLength(2);
+    // u1+sms と u2+email が残る
+    expect(list.body.some(
+      (n: { user_id: string; channel: string }) =>
+        n.user_id === "u1" && n.channel === "sms",
+    )).toBe(true);
+    expect(list.body.some(
+      (n: { user_id: string; channel: string }) =>
+        n.user_id === "u2" && n.channel === "email",
+    )).toBe(true);
+  });
+
+  it("returns 400 for invalid channel", async () => {
+    const res = await request(app).delete(
+      "/api/notifications?channel=telegram",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("channel must be one of");
+  });
+
+  it("returns 400 for invalid status", async () => {
+    const res = await request(app).delete(
+      "/api/notifications?status=expired",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("status must be one of");
+  });
+
+  it("returns 400 for invalid since (not ISO 8601)", async () => {
+    const res = await request(app).delete(
+      "/api/notifications?since=not-a-date",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("since");
+  });
+
+  it("returns 400 when since > until", async () => {
+    const res = await request(app).delete(
+      "/api/notifications?since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(
+      "until must be greater than or equal to since",
+    );
+  });
+
+  it("returns deleted=0 when no notifications match the filter", async () => {
+    await seedNotification("u1", "email");
+    const res = await request(app).delete(
+      "/api/notifications?user_id=unknown",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(0);
+    expect(res.body.user_id).toBe("unknown");
+
+    const list = await request(app).get("/api/notifications");
+    expect(list.body).toHaveLength(1);
+  });
+
+  it("does not delete notifications that match nothing in a multi-filter request", async () => {
+    await seedNotification("u1", "email");
+    await seedNotification("u1", "sms");
+    // user_id=u1 AND channel=push → どれも一致せず deleted=0、両方残る
+    const res = await request(app).delete(
+      "/api/notifications?user_id=u1&channel=push",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(0);
+
+    const list = await request(app).get("/api/notifications");
+    expect(list.body).toHaveLength(2);
+  });
+
+  it("filters by since (inclusive lower bound)", async () => {
+    const id1 = await seedNotification("u1", "email");
+    // 少し待ってから 2 件目を作成
+    await new Promise((r) => setTimeout(r, 20));
+    const id2 = await seedNotification("u1", "email");
+
+    // id2 の created_at を since に指定 → id1 は対象外、id2 のみ削除
+    const get2 = await request(app).get(`/api/notifications/${id2}`);
+    const since = get2.body.created_at as string;
+    const res = await request(app).delete(
+      `/api/notifications?since=${encodeURIComponent(since)}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(1);
+    const remain = await request(app).get(`/api/notifications/${id1}`);
+    expect(remain.status).toBe(200);
+  });
+});
