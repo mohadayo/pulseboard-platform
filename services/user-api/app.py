@@ -292,6 +292,63 @@ def change_password():
     return jsonify({"updated": True})
 
 
+@app.route("/api/users/me", methods=["PATCH"])
+def update_current_user():
+    """ログイン中ユーザのプロフィール (現状 `name` のみ) を部分更新する。
+
+    `Authorization: Bearer <JWT>` を検証した上で、JSON ボディの `name` を
+    新しい表示名として保存する。`name` 以外のフィールドは無視する（将来の
+    属性追加に備えて余計なキーは黙って破棄）。
+
+    バリデーション規則:
+    - `name` は string（数値・配列・オブジェクト等は 400）
+    - 前後空白は登録時と同じく `strip()` で除去
+    - 空文字も許可（表示名なしの状態に戻したいケース）
+    - 長さは登録時と同じ `MAX_NAME_LENGTH` を上限
+
+    戻り値は `GET /api/users/me` と同形 (`id` / `email` / `name` / `created_at`) で、
+    更新後の状態をエコーする。
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Authorization header required"}), 401
+
+    try:
+        payload = jwt.decode(auth_header[7:], SECRET_KEY, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid token"}), 401
+
+    data = request.get_json(silent=True)
+    if data is None or not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+    if "name" not in data:
+        return jsonify({"error": "name is required"}), 400
+
+    name_raw = data.get("name")
+    if not isinstance(name_raw, str):
+        return jsonify({"error": "Name must be a string"}), 400
+    name = name_raw.strip()
+    if len(name) > MAX_NAME_LENGTH:
+        return jsonify({"error": f"Name must be at most {MAX_NAME_LENGTH} characters"}), 400
+
+    email = payload.get("email")
+    user = users_db.get(email)
+    if not user:
+        logger.warning("Profile update for missing user: %s", email)
+        return jsonify({"error": "User not found"}), 404
+
+    user["name"] = name
+    logger.info("User updated profile: %s (name=%r)", email, name)
+    return jsonify({
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "created_at": user["created_at"],
+    })
+
+
 @app.route("/api/users", methods=["GET"])
 def list_users():
     limit = _parse_pagination_param(request.args.get("limit"), USERS_DEFAULT_LIMIT, 1, USERS_MAX_LIMIT)
