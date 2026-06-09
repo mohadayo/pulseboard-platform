@@ -612,3 +612,141 @@ def test_change_password_does_not_leak_password_in_response(client):
     assert "current_password" not in body
     assert "new_password" not in body
     assert "hash" not in body
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/users/me — プロフィール（name）更新
+# ---------------------------------------------------------------------------
+
+
+def test_update_me_success(client):
+    token = _register_and_login(client, name="Alice")
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Alice Wonderland"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["email"] == "a@b.com"
+    assert body["name"] == "Alice Wonderland"
+    assert "id" in body
+    assert "created_at" in body
+
+    # 永続化されていること（再取得しても新しい name）
+    me = client.get("/api/users/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.get_json()["name"] == "Alice Wonderland"
+
+
+def test_update_me_strips_whitespace(client):
+    token = _register_and_login(client)
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "  Bob  "},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["name"] == "Bob"
+
+
+def test_update_me_accepts_empty_name(client):
+    # 表示名を消す UX を許可する（登録時も "" を許可しているため整合）
+    token = _register_and_login(client, name="Alice")
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": ""},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["name"] == ""
+
+
+def test_update_me_requires_auth(client):
+    resp = client.patch("/api/users/me", json={"name": "x"})
+    assert resp.status_code == 401
+
+
+def test_update_me_invalid_token(client):
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": "Bearer invalidtoken"},
+        json={"name": "x"},
+    )
+    assert resp.status_code == 401
+
+
+def test_update_me_missing_body(client):
+    token = _register_and_login(client)
+    # JSON ボディ無し
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_update_me_missing_name_field(client):
+    token = _register_and_login(client)
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"foo": "bar"},
+    )
+    assert resp.status_code == 400
+    assert "name" in resp.get_json()["error"]
+
+
+def test_update_me_rejects_non_string_name(client):
+    token = _register_and_login(client)
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": 42},
+    )
+    assert resp.status_code == 400
+    assert "string" in resp.get_json()["error"].lower()
+
+
+def test_update_me_rejects_too_long_name(client):
+    token = _register_and_login(client)
+    # MAX_NAME_LENGTH=100 (デフォルト)
+    long_name = "a" * 101
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": long_name},
+    )
+    assert resp.status_code == 400
+    assert "100 characters" in resp.get_json()["error"]
+
+
+def test_update_me_ignores_email_and_password(client):
+    # `name` 以外のフィールドは黙って破棄。email / password の改変は許さない。
+    token = _register_and_login(client, email="orig@x.com")
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "New", "email": "hacked@x.com", "password": "evil"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # email は変わらない
+    assert body["email"] == "orig@x.com"
+    # password も保存ハッシュは変わらない（旧 password でログインできる）
+    login = client.post(
+        "/api/users/login",
+        json={"email": "orig@x.com", "password": "pass123"},
+    )
+    assert login.status_code == 200
+
+
+def test_update_me_for_deleted_user_returns_404(client):
+    token = _register_and_login(client)
+    # JWT は有効だが users_db からユーザーを直接削除して、404 経路を踏ませる
+    users_db.clear()
+    resp = client.patch(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "x"},
+    )
+    assert resp.status_code == 404
