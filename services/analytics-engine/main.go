@@ -531,6 +531,42 @@ func getEventByIDHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(found)
 }
 
+// deleteEventByIDHandler は DELETE /api/analytics/events/{id} を処理し、
+// id 完全一致の 1 件を削除する。削除前のイベントをレスポンスに含めるので、
+// クライアントは別 GET をしなくても監査ログに残せる。
+func deleteEventByIDHandler(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSONError(w, http.StatusBadRequest, "id must not be blank")
+		return
+	}
+	mu.Lock()
+	var removed *Event
+	for i := range events {
+		if events[i].ID == id {
+			// 削除前の値を保持してロック外で安全に Encode する。
+			e := events[i]
+			removed = &e
+			// in-place で 1 件を取り除く（順序を保つ）。
+			events = append(events[:i], events[i+1:]...)
+			break
+		}
+	}
+	mu.Unlock()
+	if removed == nil {
+		log.Printf("Event not found on delete: id=%s", id)
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("event %q not found", id))
+		return
+	}
+	log.Printf("Event deleted: id=%s type=%s user=%s", removed.ID, removed.EventType, removed.UserID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"deleted": 1,
+		"id":      removed.ID,
+		"event":   removed,
+	})
+}
+
 // newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
 func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -538,10 +574,11 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/api/analytics/track", trackHandler)
 	mux.HandleFunc("/api/analytics/stats", statsHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
-	// 単一イベント取得。Go 1.22 の拡張ルーティングで {id} を取り出す。
-	// `/api/analytics/events`（一覧/削除）と `/api/analytics/events/{id}`（単発）は
-	// パターンとして異なるため衝突しない。
+	// 単一イベント取得 / 削除。Go 1.22 の拡張ルーティングで {id} を取り出す。
+	// `/api/analytics/events`（一覧/フィルタ削除）と `/api/analytics/events/{id}`（単発）は
+	// パターンとして異なるため衝突しない。メソッド指定で GET と DELETE を別ハンドラに振り分ける。
 	mux.HandleFunc("GET /api/analytics/events/{id}", getEventByIDHandler)
+	mux.HandleFunc("DELETE /api/analytics/events/{id}", deleteEventByIDHandler)
 	return mux
 }
 
