@@ -102,6 +102,7 @@ curl -X POST http://localhost:5001/api/users/login \
 | GET | `/api/analytics/events` | List all events |
 | GET | `/api/analytics/events/{id}` | Get a single event by id (404 if not found) |
 | DELETE | `/api/analytics/events` | Delete events by `user_id` / `event_type` / `before` filters |
+| DELETE | `/api/analytics/events/{id}` | Delete a single event by id. レスポンスに削除前のイベント内容を含め、別 GET なしで監査ログに残せる。存在しない id は 404 |
 
 **Track Event:**
 ```bash
