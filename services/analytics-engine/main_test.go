@@ -1111,3 +1111,191 @@ func TestGetEventByID_BlankIDReturns404(t *testing.T) {
 		t.Fatalf("expected 400 for blank id, got %d", w.Code)
 	}
 }
+
+// === DELETE /api/analytics/events/{id} ===
+
+func TestDeleteEventByID_Success(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "click", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u2", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u3", EventType: "click", Timestamp: "2026-05-03T00:00:00Z"},
+	})
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	// 真ん中の evt_2 を id 指定で削除
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/analytics/events/evt_2", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["deleted"].(float64) != 1 {
+		t.Fatalf("expected deleted=1, got %v", body["deleted"])
+	}
+	if body["id"].(string) != "evt_2" {
+		t.Fatalf("expected id=evt_2, got %v", body["id"])
+	}
+	if body["event"] == nil {
+		t.Fatalf("expected event in response, got nil")
+	}
+	eventMap := body["event"].(map[string]interface{})
+	if eventMap["user_id"].(string) != "u2" {
+		t.Fatalf("expected user_id=u2 in returned event, got %v", eventMap["user_id"])
+	}
+
+	// 残った 2 件と順序が保たれていること
+	mu.RLock()
+	remaining := make([]string, len(events))
+	for i, e := range events {
+		remaining[i] = e.ID
+	}
+	mu.RUnlock()
+	if len(remaining) != 2 || remaining[0] != "evt_1" || remaining[1] != "evt_3" {
+		t.Fatalf("expected [evt_1 evt_3], got %v", remaining)
+	}
+}
+
+func TestDeleteEventByID_NotFound(t *testing.T) {
+	resetState()
+	seedEvents([]Event{{UserID: "u1", EventType: "click", Timestamp: "2026-05-01T00:00:00Z"}})
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/analytics/events/evt_does_not_exist", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body["error"], "evt_does_not_exist") {
+		t.Fatalf("error should mention id, got: %v", body)
+	}
+
+	// 既存イベントは削除されていないこと
+	mu.RLock()
+	count := len(events)
+	mu.RUnlock()
+	if count != 1 {
+		t.Fatalf("expected 1 remaining, got %d", count)
+	}
+}
+
+func TestDeleteEventByID_BlankIDReturns400(t *testing.T) {
+	// 通常のルータ経由では `{id}` 空にはならないが、直接ハンドラを呼ぶテストで
+	// ブランク id の 400 ガードを回帰する。
+	resetState()
+	req := httptest.NewRequest(http.MethodDelete, "/api/analytics/events/", nil)
+	req.SetPathValue("id", "   ")
+	w := httptest.NewRecorder()
+	deleteEventByIDHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for blank id, got %d", w.Code)
+	}
+}
+
+func TestDeleteEventByID_DoesNotAffectGetSameID(t *testing.T) {
+	// 同じ path だが GET と DELETE は別ハンドラ。順序: DELETE 前は GET 成功、
+	// DELETE 後は GET が 404 になる。
+	resetState()
+	seedEvents([]Event{{UserID: "u1", EventType: "click", Timestamp: "2026-05-01T00:00:00Z"}})
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	// 削除前: GET 成功
+	getResp, err := http.Get(srv.URL + "/api/analytics/events/evt_1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("pre-delete GET expected 200, got %d", getResp.StatusCode)
+	}
+
+	// 削除
+	delReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/analytics/events/evt_1", nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete expected 200, got %d", delResp.StatusCode)
+	}
+
+	// 削除後: GET 404
+	getResp2, err := http.Get(srv.URL + "/api/analytics/events/evt_1")
+	if err != nil {
+		t.Fatalf("get post-delete: %v", err)
+	}
+	getResp2.Body.Close()
+	if getResp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("post-delete GET expected 404, got %d", getResp2.StatusCode)
+	}
+}
+
+func TestDeleteEventByID_FilterDeleteRouteUnchanged(t *testing.T) {
+	// DELETE /api/analytics/events?user_id=... (フィルタベース) と
+	// DELETE /api/analytics/events/{id} (単発) は別 path なので衝突しない。
+	// フィルタベース側が依然として動作することを回帰する。
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "click", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u2", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+	})
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/analytics/events?user_id=u1", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete by filter: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["deleted"].(float64) != 1 {
+		t.Fatalf("expected deleted=1 by filter, got %v", body["deleted"])
+	}
+}
+
+func TestDeleteEventByID_MethodNotAllowed(t *testing.T) {
+	// PUT などは GET / DELETE のどちらにもマッチせず 405 が返る。
+	resetState()
+	seedEvents([]Event{{UserID: "u1", EventType: "click", Timestamp: "2026-05-01T00:00:00Z"}})
+
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/analytics/events/evt_1", strings.NewReader(`{}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", resp.StatusCode)
+	}
+}
