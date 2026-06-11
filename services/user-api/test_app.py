@@ -750,3 +750,147 @@ def test_update_me_for_deleted_user_returns_404(client):
         json={"name": "x"},
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/users/me — アカウント自己退会
+# ---------------------------------------------------------------------------
+
+
+def test_delete_me_success(client):
+    token = _register_and_login(client)
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"deleted": True}
+
+    # 削除後は同じ email でログインできない
+    login = client.post(
+        "/api/users/login",
+        json={"email": "a@b.com", "password": "pass123"},
+    )
+    assert login.status_code == 401
+
+    # `users_db` からも消えている
+    assert "a@b.com" not in users_db
+
+
+def test_delete_me_allows_reregistration_with_same_email(client):
+    # 削除後、同じメールアドレスでの再登録が成功すること（idempotent な lifecycle）。
+    token = _register_and_login(client)
+    client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123"},
+    )
+    resp = client.post(
+        "/api/users/register",
+        json={"email": "a@b.com", "password": "freshpass", "name": "New"},
+    )
+    assert resp.status_code == 201
+
+
+def test_delete_me_no_auth(client):
+    resp = client.delete(
+        "/api/users/me",
+        json={"current_password": "pass123"},
+    )
+    assert resp.status_code == 401
+
+
+def test_delete_me_invalid_token(client):
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": "Bearer invalidtoken"},
+        json={"current_password": "pass123"},
+    )
+    assert resp.status_code == 401
+
+
+def test_delete_me_missing_body(client):
+    token = _register_and_login(client)
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    # current_password 必須なので 400
+    assert resp.status_code == 400
+
+
+def test_delete_me_missing_current_password(client):
+    token = _register_and_login(client)
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"foo": "bar"},
+    )
+    assert resp.status_code == 400
+
+
+def test_delete_me_non_string_current_password(client):
+    token = _register_and_login(client)
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": 12345},
+    )
+    assert resp.status_code == 400
+
+
+def test_delete_me_wrong_current_password(client):
+    token = _register_and_login(client)
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "wrongpass"},
+    )
+    assert resp.status_code == 401
+    assert "Current password" in resp.get_json()["error"]
+    # 認証失敗なのでユーザは残っている
+    assert "a@b.com" in users_db
+
+
+def test_delete_me_for_already_deleted_user_returns_404(client):
+    # 二重 DELETE で 500 にならないこと（idempotent な失敗）。
+    token = _register_and_login(client)
+    users_db.clear()
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123"},
+    )
+    assert resp.status_code == 404
+
+
+def test_delete_me_does_not_affect_other_users(client):
+    # 別ユーザは削除されないこと（自分の email キーだけが消える）。
+    token_alice = _register_and_login(
+        client, email="alice@x.com", password="alicepw1", name="Alice",
+    )
+    _register_and_login(client, email="bob@x.com", password="bobpw123", name="Bob")
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token_alice}"},
+        json={"current_password": "alicepw1"},
+    )
+    assert resp.status_code == 200
+    assert "alice@x.com" not in users_db
+    assert "bob@x.com" in users_db
+
+
+def test_delete_me_response_does_not_leak_password(client):
+    token = _register_and_login(client)
+    resp = client.delete(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "pass123"},
+    )
+    body = resp.get_json()
+    # current_password / password / hash 等のフィールドが漏れていないこと
+    assert "password" not in body
+    assert "current_password" not in body
+    assert "hash" not in body
+    assert "email" not in body
