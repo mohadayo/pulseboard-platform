@@ -72,6 +72,7 @@ npm run dev
 | POST | `/api/users/register` | Register a new user |
 | POST | `/api/users/login` | Login and receive JWT |
 | GET | `/api/users/me` | Get current user profile (requires JWT) |
+| DELETE | `/api/users/me` | アカウント自己退会（要 JWT + `current_password` 再入力。削除後は同 email で再登録可能、二重 DELETE は 404、`users_db` から該当エントリのみ削除し他ユーザに影響しない） |
 | GET | `/api/users` | List users（`?limit=` / `?offset=` ページネーション、`?q=` 部分一致、`?sort=` `?order=`、`?since=` / `?until=` で `created_at` の ISO 8601 範囲フィルタ） |
 
 > Email addresses are normalized (trimmed + lowercased) on register/login, so
@@ -91,6 +92,18 @@ curl -X POST http://localhost:5001/api/users/login \
   -H "Content-Type: application/json" \
   -d '{"email":"user@example.com","password":"secret"}'
 ```
+
+**Delete account (self-service):**
+```bash
+# JWT を Authorization ヘッダで、再入力したパスワードを JSON ボディで送る。
+# 成功時 `{"deleted": true}` (200)。誤入力は 401、二重 DELETE は 404 を返す。
+curl -X DELETE http://localhost:5001/api/users/me \
+  -H "Authorization: Bearer $JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"current_password":"secret"}'
+```
+
+JWT のみでは削除を許可せず、`current_password` の再入力を要求する。これはトークン漏洩時の誤削除・第三者による削除を防ぐためで、`POST /api/users/me/password` と同じ二段階確認パターン。削除後は既存 JWT を明示的に失効させる機構は無いが、`/me` 系のエンドポイントは `users_db.get` で 404 を返すため実害は無い（同 email での再登録は新しい `id` が割り当てられる）。
 
 ### Analytics Engine (`:5002`)
 
