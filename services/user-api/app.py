@@ -349,6 +349,60 @@ def update_current_user():
     })
 
 
+@app.route("/api/users/me", methods=["DELETE"])
+def delete_current_user():
+    """ログイン中ユーザ自身のアカウントを退会（削除）する。
+
+    `Authorization: Bearer <JWT>` を検証し、JSON ボディの `current_password` が
+    現行ハッシュと一致した場合のみ `users_db` からエントリを削除する。
+    トークンが漏洩した状況での誤削除・第三者削除を避けるため、パスワード再入力を
+    明示的に必須化している（`change_password` と同じ二段階確認パターン）。
+
+    削除後は同じメールアドレスでの `/api/users/register` が改めて成功する。
+    既存 JWT の失効機構は本サービスに無いため、削除済みユーザのトークンは
+    自然失効まで形式上有効だが、`/me` 系の各エンドポイントは `users_db.get`
+    で 404 を返すため実害は無い（`change_password` と同じセマンティクス）。
+
+    レスポンスは `{"deleted": true}` のみで、ユーザ識別子等は含めない。
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Authorization header required"}), 401
+
+    try:
+        payload = jwt.decode(auth_header[7:], SECRET_KEY, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid token"}), 401
+
+    data = request.get_json(silent=True)
+    if data is None or not isinstance(data, dict):
+        return jsonify({"error": "current_password is required"}), 400
+
+    current_raw = data.get("current_password")
+    if current_raw is None:
+        return jsonify({"error": "current_password is required"}), 400
+    if not isinstance(current_raw, str):
+        return jsonify({"error": "current_password must be a string"}), 400
+
+    email = payload.get("email")
+    user = users_db.get(email)
+    if not user:
+        # トークン自体は valid だが対象ユーザが既に削除済みのケース（idempotent）。
+        # 二重 DELETE で 500 にしないために 404 で明示する。
+        logger.warning("Account deletion for missing user: %s", email)
+        return jsonify({"error": "User not found"}), 404
+
+    if user["password"] != hash_password(current_raw):
+        logger.warning("Account deletion with wrong current password: %s", email)
+        return jsonify({"error": "Current password is incorrect"}), 401
+
+    del users_db[email]
+    logger.info("User deleted account: %s", email)
+    return jsonify({"deleted": True})
+
+
 @app.route("/api/users", methods=["GET"])
 def list_users():
     limit = _parse_pagination_param(request.args.get("limit"), USERS_DEFAULT_LIMIT, 1, USERS_MAX_LIMIT)
