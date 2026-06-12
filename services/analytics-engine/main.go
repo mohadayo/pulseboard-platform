@@ -80,7 +80,16 @@ type StatsResponse struct {
 	TotalEvents int            `json:"total_events"`
 	ByType      map[string]int `json:"by_type"`
 	ByUser      map[string]int `json:"by_user"`
-	LastEventAt string         `json:"last_event_at,omitempty"`
+	// DistinctUsers / DistinctEventTypes は ByType / ByUser のキー数と同じだが、
+	// クライアントが ByType / ByUser を取らずに件数だけ表示したい場面（KPI バナー等）で
+	// `Object.keys(by_user).length` の事前計算なしに直接参照できるよう、明示フィールドとして返す。
+	DistinctUsers      int `json:"distinct_users"`
+	DistinctEventTypes int `json:"distinct_event_types"`
+	// FirstEventAt はフィルタ通過した最も古い Timestamp。観測ゼロのときは omitempty
+	// で省略され、LastEventAt と同じセマンティクスに揃う。RFC3339 は文字列比較で
+	// 順序が保たれるため、LastEventAt と同様に直接比較する。
+	FirstEventAt string `json:"first_event_at,omitempty"`
+	LastEventAt  string `json:"last_event_at,omitempty"`
 }
 
 var (
@@ -234,6 +243,7 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		ByUser: make(map[string]int),
 	}
 	var latestTimestamp string
+	var earliestTimestamp string
 
 	mu.RLock()
 	for _, e := range events {
@@ -248,9 +258,17 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		if e.Timestamp > latestTimestamp {
 			latestTimestamp = e.Timestamp
 		}
+		// 最古を追跡。空文字を初期値にすると常に上書きされてしまうので、
+		// "未設定" の判定を別途行う。RFC3339 は固定幅フィールドで文字列順 = 時刻順。
+		if earliestTimestamp == "" || e.Timestamp < earliestTimestamp {
+			earliestTimestamp = e.Timestamp
+		}
 	}
 	mu.RUnlock()
 	stats.LastEventAt = latestTimestamp
+	stats.FirstEventAt = earliestTimestamp
+	stats.DistinctUsers = len(stats.ByUser)
+	stats.DistinctEventTypes = len(stats.ByType)
 
 	log.Printf(
 		"Stats requested: total=%d event_type=%q user_id=%q since=%v until=%v",

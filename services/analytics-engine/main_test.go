@@ -940,6 +940,139 @@ func TestStatsHandler_NoFilterReturnsAll(t *testing.T) {
 	}
 }
 
+func TestStatsHandler_FirstEventAtTracksEarliest(t *testing.T) {
+	// 最古の Timestamp が first_event_at として返り、最新（last_event_at）と一致しないこと。
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-03T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-02T00:00:00Z"},
+	})
+	w, stats := callStats(t, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.FirstEventAt != "2026-05-01T00:00:00Z" {
+		t.Fatalf("expected first_event_at 2026-05-01T00:00:00Z, got %q", stats.FirstEventAt)
+	}
+	if stats.LastEventAt != "2026-05-03T00:00:00Z" {
+		t.Fatalf("expected last_event_at 2026-05-03T00:00:00Z, got %q", stats.LastEventAt)
+	}
+}
+
+func TestStatsHandler_SingleEventFirstEqualsLast(t *testing.T) {
+	// 1 件のみのときは first と last が一致する。
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T12:34:56Z"},
+	})
+	w, stats := callStats(t, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.FirstEventAt != stats.LastEventAt {
+		t.Fatalf("expected first == last for single event, got first=%q last=%q",
+			stats.FirstEventAt, stats.LastEventAt)
+	}
+	if stats.FirstEventAt != "2026-05-01T12:34:56Z" {
+		t.Fatalf("unexpected first_event_at %q", stats.FirstEventAt)
+	}
+}
+
+func TestStatsHandler_FirstEventAtRespectsFilter(t *testing.T) {
+	// since/until フィルタ後の集合に対して first_event_at が再計算されること。
+	// 範囲外の最古のレコードが first_event_at として漏れないことを確認する。
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-01-01T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-03T00:00:00Z"},
+	})
+	w, stats := callStats(t, "since=2026-04-01T00:00:00Z")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.FirstEventAt != "2026-05-02T00:00:00Z" {
+		t.Fatalf("expected first_event_at after since filter, got %q", stats.FirstEventAt)
+	}
+}
+
+func TestStatsHandler_EmptyResultOmitsTimestamps(t *testing.T) {
+	// 該当 0 件のときは first_event_at / last_event_at が omitempty で消える。
+	// distinct_users / distinct_event_types は 0 で出る（数値型なので omitempty 対象外）。
+	// callStats だと body を消費してしまうため、ここでは直接 statsHandler を呼んで生 body を検査する。
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/stats", nil)
+	w := httptest.NewRecorder()
+	statsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "first_event_at") {
+		t.Fatalf("expected first_event_at to be omitted on empty result, body=%s", body)
+	}
+	if strings.Contains(body, "last_event_at") {
+		t.Fatalf("expected last_event_at to be omitted on empty result, body=%s", body)
+	}
+	if !strings.Contains(body, `"distinct_users":0`) {
+		t.Fatalf("expected distinct_users=0 in body, got %s", body)
+	}
+	if !strings.Contains(body, `"distinct_event_types":0`) {
+		t.Fatalf("expected distinct_event_types=0 in body, got %s", body)
+	}
+}
+
+func TestStatsHandler_DistinctCountsMatchByMapKeys(t *testing.T) {
+	// distinct_users / distinct_event_types が by_user / by_type のキー数と一致する。
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u1", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u2", EventType: "page_view", Timestamp: "2026-05-03T00:00:00Z"},
+		{UserID: "u3", EventType: "signup", Timestamp: "2026-05-04T00:00:00Z"},
+	})
+	w, stats := callStats(t, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stats.DistinctUsers != 3 {
+		t.Fatalf("expected distinct_users=3, got %d", stats.DistinctUsers)
+	}
+	if stats.DistinctEventTypes != 3 {
+		t.Fatalf("expected distinct_event_types=3, got %d", stats.DistinctEventTypes)
+	}
+	if stats.DistinctUsers != len(stats.ByUser) {
+		t.Fatalf("distinct_users (%d) should equal len(by_user) (%d)",
+			stats.DistinctUsers, len(stats.ByUser))
+	}
+	if stats.DistinctEventTypes != len(stats.ByType) {
+		t.Fatalf("distinct_event_types (%d) should equal len(by_type) (%d)",
+			stats.DistinctEventTypes, len(stats.ByType))
+	}
+}
+
+func TestStatsHandler_DistinctCountsRespectFilter(t *testing.T) {
+	// フィルタで除外されたユーザーは distinct_users に含めない。
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "page_view", Timestamp: "2026-05-01T00:00:00Z"},
+		{UserID: "u2", EventType: "click", Timestamp: "2026-05-02T00:00:00Z"},
+		{UserID: "u3", EventType: "page_view", Timestamp: "2026-05-03T00:00:00Z"},
+	})
+	w, stats := callStats(t, "event_type=page_view")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// u1, u3 だけが page_view を発火している
+	if stats.DistinctUsers != 2 {
+		t.Fatalf("expected distinct_users=2 after filter, got %d", stats.DistinctUsers)
+	}
+	if stats.DistinctEventTypes != 1 {
+		t.Fatalf("expected distinct_event_types=1 after filter, got %d", stats.DistinctEventTypes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/analytics/events/{id} — 単一イベント取得
 // ---------------------------------------------------------------------------
