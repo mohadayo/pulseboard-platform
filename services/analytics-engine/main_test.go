@@ -1432,3 +1432,247 @@ func TestDeleteEventByID_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("expected 405, got %d", resp.StatusCode)
 	}
 }
+
+func TestEventTypesHandler_EmptyStore(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/event_types", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if total, ok := resp["total"].(float64); !ok || total != 0 {
+		t.Fatalf("expected total=0, got %v", resp["total"])
+	}
+	types, _ := resp["event_types"].([]interface{})
+	if len(types) != 0 {
+		t.Fatalf("expected empty event_types, got %d items", len(types))
+	}
+}
+
+func TestEventTypesHandler_AggregatesByType(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "signup", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u2", "signup", "2026-06-02T00:00:00Z"},
+		{"evt_3", "u2", "signup", "2026-06-03T00:00:00Z"},
+		{"evt_4", "u1", "click", "2026-06-04T00:00:00Z"},
+		{"evt_5", "u3", "click", "2026-06-05T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/event_types", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		EventTypes []EventTypeAggregate `json:"event_types"`
+		Total      int                  `json:"total"`
+		Count      int                  `json:"count"`
+		Sort       string               `json:"sort"`
+		Order      string               `json:"order"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 || resp.Count != 2 {
+		t.Fatalf("expected total=2 count=2, got total=%d count=%d", resp.Total, resp.Count)
+	}
+	if resp.Sort != "event_type" || resp.Order != "asc" {
+		t.Fatalf("expected default sort/order, got %s/%s", resp.Sort, resp.Order)
+	}
+	// 既定では event_type 昇順 — "click", "signup"
+	if resp.EventTypes[0].EventType != "click" {
+		t.Fatalf("expected first=click, got %s", resp.EventTypes[0].EventType)
+	}
+	clickAgg := resp.EventTypes[0]
+	if clickAgg.EventCount != 2 || clickAgg.DistinctUsers != 2 {
+		t.Fatalf("click: expected count=2 distinct=2, got count=%d distinct=%d", clickAgg.EventCount, clickAgg.DistinctUsers)
+	}
+	if clickAgg.FirstEventAt != "2026-06-04T00:00:00Z" || clickAgg.LastEventAt != "2026-06-05T00:00:00Z" {
+		t.Fatalf("click: first/last mismatch: %s / %s", clickAgg.FirstEventAt, clickAgg.LastEventAt)
+	}
+	signupAgg := resp.EventTypes[1]
+	if signupAgg.EventCount != 3 || signupAgg.DistinctUsers != 2 {
+		t.Fatalf("signup: expected count=3 distinct=2, got count=%d distinct=%d", signupAgg.EventCount, signupAgg.DistinctUsers)
+	}
+	if signupAgg.FirstEventAt != "2026-06-01T00:00:00Z" || signupAgg.LastEventAt != "2026-06-03T00:00:00Z" {
+		t.Fatalf("signup: first/last mismatch: %s / %s", signupAgg.FirstEventAt, signupAgg.LastEventAt)
+	}
+}
+
+func TestEventTypesHandler_SortByEventCountDesc(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "click", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u2", "click", "2026-06-02T00:00:00Z"},
+		{"evt_3", "u3", "click", "2026-06-03T00:00:00Z"},
+		{"evt_4", "u1", "signup", "2026-06-04T00:00:00Z"},
+		{"evt_5", "u2", "purchase", "2026-06-05T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/event_types?sort=event_count&order=desc", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		EventTypes []EventTypeAggregate `json:"event_types"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.EventTypes[0].EventType != "click" || resp.EventTypes[0].EventCount != 3 {
+		t.Fatalf("expected click first with count=3, got %+v", resp.EventTypes[0])
+	}
+	// purchase / signup は count=1 で同点 → 同点時は event_type 昇順タイブレーカー
+	if resp.EventTypes[1].EventType != "purchase" || resp.EventTypes[2].EventType != "signup" {
+		t.Fatalf("tiebreaker should keep event_type ascending: got %s, %s",
+			resp.EventTypes[1].EventType, resp.EventTypes[2].EventType)
+	}
+}
+
+func TestEventTypesHandler_SinceUntilFilter(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "signup", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u2", "signup", "2026-06-05T00:00:00Z"},
+		{"evt_3", "u3", "signup", "2026-06-10T00:00:00Z"},
+		{"evt_4", "u1", "click", "2026-06-15T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/analytics/event_types?since=2026-06-03T00:00:00Z&until=2026-06-12T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		EventTypes []EventTypeAggregate `json:"event_types"`
+		Total      int                  `json:"total"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	// ウィンドウ内 signup の 2 件のみ
+	if resp.Total != 1 {
+		t.Fatalf("expected total=1 (only signup in window), got %d", resp.Total)
+	}
+	if resp.EventTypes[0].EventType != "signup" || resp.EventTypes[0].EventCount != 2 {
+		t.Fatalf("expected signup count=2, got %+v", resp.EventTypes[0])
+	}
+}
+
+func TestEventTypesHandler_Pagination(t *testing.T) {
+	seed := []struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{}
+	for i, et := range []string{"a", "b", "c", "d", "e"} {
+		seed = append(seed, struct {
+			ID        string
+			UserID    string
+			EventType string
+			Timestamp string
+		}{
+			ID:        fmt.Sprintf("evt_%d", i+1),
+			UserID:    "u1",
+			EventType: et,
+			Timestamp: fmt.Sprintf("2026-06-%02dT00:00:00Z", i+1),
+		})
+	}
+	seedEventsAt(seed)
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/event_types?limit=2&offset=1", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		EventTypes []EventTypeAggregate `json:"event_types"`
+		Total      int                  `json:"total"`
+		Count      int                  `json:"count"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 5 || resp.Count != 2 {
+		t.Fatalf("expected total=5 count=2, got total=%d count=%d", resp.Total, resp.Count)
+	}
+	// event_type 昇順 → a, b, c, d, e → offset=1 limit=2 で b, c
+	if resp.EventTypes[0].EventType != "b" || resp.EventTypes[1].EventType != "c" {
+		t.Fatalf("expected b,c got %s,%s", resp.EventTypes[0].EventType, resp.EventTypes[1].EventType)
+	}
+}
+
+func TestEventTypesHandler_MethodNotAllowed(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/event_types", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestEventTypesHandler_InvalidSortField(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/event_types?sort=garbage", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestEventTypesHandler_InvalidSinceFormat(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/event_types?since=not-a-date", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestEventTypesHandler_SinceGreaterThanUntil(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/analytics/event_types?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	eventTypesHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestEventTypesHandler_RegisteredOnRouter(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "click", Timestamp: "2026-06-01T00:00:00Z"},
+	})
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/analytics/event_types")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}

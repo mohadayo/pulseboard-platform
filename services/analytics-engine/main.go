@@ -585,12 +585,193 @@ func deleteEventByIDHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// allowedEventTypeSortFields は GET /api/analytics/event_types の sort= 候補。
+var allowedEventTypeSortFields = map[string]bool{
+	"event_type":     true,
+	"event_count":    true,
+	"distinct_users": true,
+	"first_event_at": true,
+	"last_event_at":  true,
+}
+
+// EventTypeAggregate は event_types エンドポイントの 1 要素。
+// JSON タグは StatsResponse と意味的に揃える（first_event_at / last_event_at）。
+type EventTypeAggregate struct {
+	EventType     string `json:"event_type"`
+	EventCount    int    `json:"event_count"`
+	DistinctUsers int    `json:"distinct_users"`
+	FirstEventAt  string `json:"first_event_at"`
+	LastEventAt   string `json:"last_event_at"`
+}
+
+// eventTypesHandler は GET /api/analytics/event_types を処理する。
+// 保持中イベントを 1 回スキャンして event_type ごとに件数 / distinct_users /
+// first_event_at / last_event_at を集計し、sort + pagination をかけて返す。
+//
+// 既存 stats エンドポイントは「全体集計の数値」のみで、event_type 別の
+// timeline (first/last) や per-type の distinct ユーザー数を返さない。
+// UI 側で /events?event_type=X を type の数だけ叩く必要があったため、
+// 単発エンドポイントで集約して返す。
+func eventTypesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+
+	since, err := parseAnalyticsQueryTime(query.Get("since"), "since")
+	if err != nil {
+		log.Printf("Invalid event_types since: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	until, err := parseAnalyticsQueryTime(query.Get("until"), "until")
+	if err != nil {
+		log.Printf("Invalid event_types until: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		writeJSONError(w, http.StatusBadRequest, "query parameter 'until' must be greater than or equal to 'since'")
+		return
+	}
+
+	sortField := query.Get("sort")
+	if sortField == "" {
+		sortField = "event_type"
+	}
+	if !allowedEventTypeSortFields[sortField] {
+		log.Printf("Invalid event_types sort field: %q", sortField)
+		writeJSONError(w, http.StatusBadRequest, "sort must be one of: distinct_users, event_count, event_type, first_event_at, last_event_at")
+		return
+	}
+	sortOrder := query.Get("order")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	if !allowedEventSortOrders[sortOrder] {
+		log.Printf("Invalid event_types sort order: %q", sortOrder)
+		writeJSONError(w, http.StatusBadRequest, "order must be one of: asc, desc")
+		return
+	}
+
+	limit, offset, perr := parseEventsPageQuery(query)
+	if perr != nil {
+		log.Printf("Invalid event_types pagination: %v", perr)
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return
+	}
+
+	type bucket struct {
+		count    int
+		users    map[string]struct{}
+		first    string
+		last     string
+	}
+	buckets := make(map[string]*bucket)
+
+	mu.RLock()
+	for _, e := range events {
+		if !matchEventFilters(e, "", "", since, until) {
+			continue
+		}
+		b, ok := buckets[e.EventType]
+		if !ok {
+			b = &bucket{users: make(map[string]struct{})}
+			buckets[e.EventType] = b
+		}
+		b.count++
+		b.users[e.UserID] = struct{}{}
+		// RFC3339 は固定幅フィールドで文字列比較が時刻順と一致する。
+		if b.first == "" || e.Timestamp < b.first {
+			b.first = e.Timestamp
+		}
+		if e.Timestamp > b.last {
+			b.last = e.Timestamp
+		}
+	}
+	mu.RUnlock()
+
+	result := make([]EventTypeAggregate, 0, len(buckets))
+	for et, b := range buckets {
+		result = append(result, EventTypeAggregate{
+			EventType:     et,
+			EventCount:    b.count,
+			DistinctUsers: len(b.users),
+			FirstEventAt:  b.first,
+			LastEventAt:   b.last,
+		})
+	}
+
+	// primary field の値を抽出し、reverse の方向に応じた比較を返す。
+	// 同値時は event_type 昇順をタイブレーカーとして使い、reverse モードでも
+	// 同一にすることで「primary 同値の表示順」が予測可能になる。
+	reverse := sortOrder == "desc"
+	primaryLess := func(a, c EventTypeAggregate) (less, equal bool) {
+		switch sortField {
+		case "event_type":
+			return a.EventType < c.EventType, a.EventType == c.EventType
+		case "event_count":
+			return a.EventCount < c.EventCount, a.EventCount == c.EventCount
+		case "distinct_users":
+			return a.DistinctUsers < c.DistinctUsers, a.DistinctUsers == c.DistinctUsers
+		case "first_event_at":
+			return a.FirstEventAt < c.FirstEventAt, a.FirstEventAt == c.FirstEventAt
+		case "last_event_at":
+			return a.LastEventAt < c.LastEventAt, a.LastEventAt == c.LastEventAt
+		}
+		return false, true
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		a, c := result[i], result[j]
+		less, equal := primaryLess(a, c)
+		if equal {
+			// タイブレーカーは reverse の影響を受けず、常に event_type 昇順。
+			return a.EventType < c.EventType
+		}
+		if reverse {
+			return !less
+		}
+		return less
+	})
+
+	total := len(result)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := result[start:end]
+	if page == nil {
+		page = []EventTypeAggregate{}
+	}
+
+	log.Printf(
+		"EventTypes requested: total=%d returned=%d limit=%d offset=%d sort=%s order=%s",
+		total, len(page), limit, offset, sortField, sortOrder,
+	)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"event_types": page,
+		"count":       len(page),
+		"total":       total,
+		"limit":       limit,
+		"offset":      offset,
+		"sort":        sortField,
+		"order":       sortOrder,
+	})
+}
+
 // newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
 func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/analytics/track", trackHandler)
 	mux.HandleFunc("/api/analytics/stats", statsHandler)
+	mux.HandleFunc("/api/analytics/event_types", eventTypesHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
 	// 単一イベント取得 / 削除。Go 1.22 の拡張ルーティングで {id} を取り出す。
 	// `/api/analytics/events`（一覧/フィルタ削除）と `/api/analytics/events/{id}`（単発）は
