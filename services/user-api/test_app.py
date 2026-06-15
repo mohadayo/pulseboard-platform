@@ -894,3 +894,143 @@ def test_delete_me_response_does_not_leak_password(client):
     assert "current_password" not in body
     assert "hash" not in body
     assert "email" not in body
+
+
+# ---- /api/users/count ----
+
+def test_count_users_empty(client):
+    resp = client.get("/api/users/count")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {
+        "total": 0,
+        "oldest_created_at": None,
+        "newest_created_at": None,
+    }
+
+
+def test_count_users_basic(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-06-01T00:00:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-12-01T00:00:00+00:00")
+    resp = client.get("/api/users/count")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 3
+    assert body["oldest_created_at"] == "2024-01-01T00:00:00+00:00"
+    assert body["newest_created_at"] == "2024-12-01T00:00:00+00:00"
+
+
+def test_count_users_filters_by_q_email(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-02-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 1
+
+
+def test_count_users_filters_by_q_name(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    users_db["a@example.com"]["name"] = "Charlie"
+    _register_user_with_created_at("b@example.com", "2024-02-01T00:00:00+00:00")
+    users_db["b@example.com"]["name"] = "Dave"
+    resp = client.get("/api/users/count?q=charlie")
+    body = resp.get_json()
+    assert body["total"] == 1
+
+
+def test_count_users_q_case_insensitive(client):
+    _register_user_with_created_at("Alice@Example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?q=ALICE")
+    body = resp.get_json()
+    # email は register 経由でなく直接書き込みのため、normalize されていないが小文字化比較される
+    assert body["total"] == 1
+
+
+def test_count_users_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["oldest_created_at"] == "2024-06-01T00:00:00+00:00"
+    assert body["newest_created_at"] == "2024-06-01T00:00:00+00:00"
+    assert body["since"] == "2024-03-01T00:00:00Z"
+
+
+def test_count_users_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?until=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["oldest_created_at"] == "2024-01-01T00:00:00+00:00"
+    assert body["until"] == "2024-03-01T00:00:00Z"
+
+
+def test_count_users_filters_by_range(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-06-01T00:00:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-12-01T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/count?since=2024-03-01T00:00:00Z&until=2024-09-01T00:00:00Z"
+    )
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["oldest_created_at"] == "2024-06-01T00:00:00+00:00"
+
+
+def test_count_users_q_combined_with_since(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("alice2@example.com", "2024-06-01T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-06-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?q=alice&since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+
+
+def test_count_users_rejects_invalid_since(client):
+    resp = client.get("/api/users/count?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_count_users_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/count?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_count_users_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/count?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_count_users_ignores_pagination_params(client):
+    # count は limit / offset / sort / order を解釈しない（あっても 200 を返し、
+    # total は常にフィルタ後の全件数）。
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-02-01T00:00:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-03-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?limit=1&offset=99999&sort=created_at&order=desc")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 3
+
+
+def test_count_users_blank_q_treated_as_unfiltered(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-02-01T00:00:00+00:00")
+    resp = client.get("/api/users/count?q=%20")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 2
+
+
+def test_count_users_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/count")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
