@@ -403,6 +403,90 @@ def delete_current_user():
     return jsonify({"deleted": True})
 
 
+@app.route("/api/users/count", methods=["GET"])
+def count_users():
+    """フィルタ後のユーザ件数と最古／最新の登録時刻のみを返す軽量エンドポイント。
+
+    `GET /api/users` はページングされたユーザ一覧を返すが、UI で「総数バッジ」や
+    「登録期間の表示」だけを出したい場合、`limit=1` で叩いて `total` を読み取る運用は
+    レスポンスにユーザ本体が含まれるため帯域・JSON サイズが無駄になる。本エンドポイントは
+    `users` 配列を一切返さず、`total` / `oldest_created_at` / `newest_created_at` のみ
+    返す。フィルタは `GET /api/users` と同じ `q` / `since` / `until` を流用する。
+
+    Sort / pagination パラメータは無視する（count は順序・ページに依存しない）。
+    フィルタ後 0 件の場合、`oldest_created_at` と `newest_created_at` は `null`。
+    """
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q on count: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since on count: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until on count: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range on count: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
+    total = 0
+    oldest_created_at = None
+    newest_created_at = None
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        created_raw = u.get("created_at") if isinstance(u.get("created_at"), str) else None
+        if since_dt is not None or until_dt is not None:
+            if created_raw is None:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt < since_dt:
+                continue
+            if until_dt is not None and created_dt > until_dt:
+                continue
+
+        total += 1
+        # ISO 8601 文字列同士の lex 比較は UTC 統一前提で正しく動く
+        # （register / update では `datetime.now(timezone.utc).isoformat()` で固定書込）。
+        if created_raw is not None:
+            if oldest_created_at is None or created_raw < oldest_created_at:
+                oldest_created_at = created_raw
+            if newest_created_at is None or created_raw > newest_created_at:
+                newest_created_at = created_raw
+
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    logger.info(
+        "Count users: total=%d (q=%s since=%s until=%s)",
+        total, q, since_raw, until_raw,
+    )
+    resp = {
+        "total": total,
+        "oldest_created_at": oldest_created_at,
+        "newest_created_at": newest_created_at,
+    }
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
+
+
 @app.route("/api/users", methods=["GET"])
 def list_users():
     limit = _parse_pagination_param(request.args.get("limit"), USERS_DEFAULT_LIMIT, 1, USERS_MAX_LIMIT)
