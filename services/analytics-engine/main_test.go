@@ -1676,3 +1676,267 @@ func TestEventTypesHandler_RegisteredOnRouter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
+
+// ---- /api/analytics/users ----
+
+func TestUsersHandler_EmptyStore(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if total, ok := resp["total"].(float64); !ok || total != 0 {
+		t.Fatalf("expected total=0, got %v", resp["total"])
+	}
+	users, _ := resp["users"].([]interface{})
+	if len(users) != 0 {
+		t.Fatalf("expected empty users, got %d items", len(users))
+	}
+	if sort, _ := resp["sort"].(string); sort != "user_id" {
+		t.Fatalf("expected default sort=user_id, got %v", resp["sort"])
+	}
+}
+
+func TestUsersHandler_AggregatesByUserID(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "signup", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u1", "click", "2026-06-02T00:00:00Z"},
+		{"evt_3", "u2", "signup", "2026-06-03T00:00:00Z"},
+		{"evt_4", "u2", "signup", "2026-06-04T00:00:00Z"},
+		{"evt_5", "u1", "click", "2026-06-05T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Users []UserAggregate `json:"users"`
+		Total int             `json:"total"`
+		Count int             `json:"count"`
+		Sort  string          `json:"sort"`
+		Order string          `json:"order"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 || resp.Count != 2 {
+		t.Fatalf("expected total=2 count=2, got total=%d count=%d", resp.Total, resp.Count)
+	}
+	if resp.Sort != "user_id" || resp.Order != "asc" {
+		t.Fatalf("expected default sort=user_id order=asc, got %s/%s", resp.Sort, resp.Order)
+	}
+	u1 := resp.Users[0]
+	if u1.UserID != "u1" || u1.EventCount != 3 || u1.DistinctEventTypes != 2 {
+		t.Fatalf("u1 mismatch: %+v", u1)
+	}
+	if u1.FirstEventAt != "2026-06-01T00:00:00Z" || u1.LastEventAt != "2026-06-05T00:00:00Z" {
+		t.Fatalf("u1 first/last mismatch: %s / %s", u1.FirstEventAt, u1.LastEventAt)
+	}
+	u2 := resp.Users[1]
+	if u2.UserID != "u2" || u2.EventCount != 2 || u2.DistinctEventTypes != 1 {
+		t.Fatalf("u2 mismatch: %+v", u2)
+	}
+}
+
+func TestUsersHandler_SortByEventCountDesc(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "click", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u2", "click", "2026-06-02T00:00:00Z"},
+		{"evt_3", "u3", "click", "2026-06-03T00:00:00Z"},
+		{"evt_4", "u3", "signup", "2026-06-04T00:00:00Z"},
+		{"evt_5", "u3", "purchase", "2026-06-05T00:00:00Z"},
+		{"evt_6", "u2", "signup", "2026-06-06T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?sort=event_count&order=desc", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Users []UserAggregate `json:"users"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Users[0].UserID != "u3" {
+		t.Fatalf("expected u3 first (3 events), got %s", resp.Users[0].UserID)
+	}
+	// 同 event_count (u2=2 / u1=1) では event_count 同値タイブレーカで user_id 昇順だが、
+	// u2=2 / u1=1 は同値ではないので u2 → u1 の順になる。
+	if resp.Users[1].UserID != "u2" || resp.Users[2].UserID != "u1" {
+		t.Fatalf("unexpected order: %s, %s", resp.Users[1].UserID, resp.Users[2].UserID)
+	}
+}
+
+func TestUsersHandler_TieBreakerIsUserIDAsc(t *testing.T) {
+	// 同 event_count なら user_id 昇順がタイブレーカー（reverse 指定でも変わらない）。
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "uB", "click", "2026-06-01T00:00:00Z"},
+		{"evt_2", "uA", "click", "2026-06-02T00:00:00Z"},
+		{"evt_3", "uC", "click", "2026-06-03T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?sort=event_count&order=desc", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Users []UserAggregate `json:"users"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := []string{resp.Users[0].UserID, resp.Users[1].UserID, resp.Users[2].UserID}
+	want := []string{"uA", "uB", "uC"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tie-break order mismatch: got %v want %v", got, want)
+		}
+	}
+}
+
+func TestUsersHandler_SinceUntilFilter(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "click", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u1", "click", "2026-06-05T00:00:00Z"},
+		{"evt_3", "u2", "click", "2026-06-10T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?since=2026-06-04T00:00:00Z&until=2026-06-09T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Users []UserAggregate `json:"users"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("expected total=1 in window, got %d", resp.Total)
+	}
+	if resp.Users[0].UserID != "u1" || resp.Users[0].EventCount != 1 {
+		t.Fatalf("expected u1 with 1 event in window, got %+v", resp.Users[0])
+	}
+}
+
+func TestUsersHandler_Pagination(t *testing.T) {
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"e1", "uA", "click", "2026-06-01T00:00:00Z"},
+		{"e2", "uB", "click", "2026-06-01T00:00:00Z"},
+		{"e3", "uC", "click", "2026-06-01T00:00:00Z"},
+		{"e4", "uD", "click", "2026-06-01T00:00:00Z"},
+		{"e5", "uE", "click", "2026-06-01T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?limit=2&offset=2", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Users []UserAggregate `json:"users"`
+		Total int             `json:"total"`
+		Count int             `json:"count"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 5 || resp.Count != 2 {
+		t.Fatalf("expected total=5 count=2, got total=%d count=%d", resp.Total, resp.Count)
+	}
+	got := []string{resp.Users[0].UserID, resp.Users[1].UserID}
+	if got[0] != "uC" || got[1] != "uD" {
+		t.Fatalf("expected page=[uC,uD], got %v", got)
+	}
+}
+
+func TestUsersHandler_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/users", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestUsersHandler_InvalidSortField(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?sort=bogus", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUsersHandler_InvalidOrder(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?order=bogus", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUsersHandler_SinceGreaterThanUntil(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/users?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	usersHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUsersHandler_RegisteredOnRouter(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "click", Timestamp: "2026-06-01T00:00:00Z"},
+	})
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/analytics/users")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
