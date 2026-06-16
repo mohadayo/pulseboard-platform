@@ -487,6 +487,96 @@ def count_users():
     return jsonify(resp)
 
 
+@app.route("/api/users/by_domain", methods=["GET"])
+def users_by_domain():
+    """メールアドレスのドメイン (`@` 以降) 別のユーザ集計を返す。
+
+    `GET /api/users/count` が「総数だけ」を返すのに対し、本エンドポイントは
+    ドメイン別の内訳を `count` 降順 (同 count はドメイン名昇順) で返す軽量集計。
+    `/api/users` で全件取得してフロント側で抽出する運用に比べて、ペイロードと
+    JSON エンコード時間を大幅に削減できる。
+
+    フィルタは `/api/users/count` と同じ `q` / `since` / `until` を流用。
+    Sort / pagination パラメータは無視する（集計結果は順序に依存しない）。
+
+    メールアドレスに `@` が含まれない壊れたユーザは `unknown` ドメインに
+    フォールバック集計する（運用上はデータ品質の指標になる）。
+    """
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q on by_domain: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since on by_domain: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until on by_domain: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range on by_domain: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
+    counts: dict[str, int] = {}
+    total = 0
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        created_raw = u.get("created_at") if isinstance(u.get("created_at"), str) else None
+        if since_dt is not None or until_dt is not None:
+            if created_raw is None:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt < since_dt:
+                continue
+            if until_dt is not None and created_dt > until_dt:
+                continue
+
+        email = u.get("email", "")
+        if isinstance(email, str) and "@" in email:
+            # `normalize_email` と同じく lower-case で集計するため、`@` 以降は
+            # 一度 lower してから取り出す（register 時点で正規化されている前提だが保険）。
+            domain = email.lower().rsplit("@", 1)[1]
+        else:
+            domain = "unknown"
+        counts[domain] = counts.get(domain, 0) + 1
+        total += 1
+
+    # count 降順、同 count はドメイン名昇順。
+    sorted_items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    by_domain = [{"domain": d, "count": c} for d, c in sorted_items]
+
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    logger.info(
+        "Users by domain: total=%d distinct=%d (q=%s since=%s until=%s)",
+        total, len(by_domain), q, since_raw, until_raw,
+    )
+    resp = {
+        "total": total,
+        "distinct_domains": len(by_domain),
+        "by_domain": by_domain,
+    }
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
+
+
 @app.route("/api/users", methods=["GET"])
 def list_users():
     limit = _parse_pagination_param(request.args.get("limit"), USERS_DEFAULT_LIMIT, 1, USERS_MAX_LIMIT)
