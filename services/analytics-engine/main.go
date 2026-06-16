@@ -594,6 +594,26 @@ var allowedEventTypeSortFields = map[string]bool{
 	"last_event_at":  true,
 }
 
+// allowedUserSortFields は GET /api/analytics/users の sort= 候補。
+// event_types エンドポイントと並行な命名で揃える（タイブレーカは常に user_id 昇順）。
+var allowedUserSortFields = map[string]bool{
+	"user_id":              true,
+	"event_count":          true,
+	"distinct_event_types": true,
+	"first_event_at":       true,
+	"last_event_at":        true,
+}
+
+// UserAggregate は users エンドポイントの 1 要素。
+// EventTypeAggregate と意図的に対称な構造（grouping キーと distinct カウントの軸が入れ替わる）。
+type UserAggregate struct {
+	UserID             string `json:"user_id"`
+	EventCount         int    `json:"event_count"`
+	DistinctEventTypes int    `json:"distinct_event_types"`
+	FirstEventAt       string `json:"first_event_at"`
+	LastEventAt        string `json:"last_event_at"`
+}
+
 // EventTypeAggregate は event_types エンドポイントの 1 要素。
 // JSON タグは StatsResponse と意味的に揃える（first_event_at / last_event_at）。
 type EventTypeAggregate struct {
@@ -765,6 +785,163 @@ func eventTypesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// usersHandler は GET /api/analytics/users を処理する。
+// 保持中イベントを 1 回スキャンして user_id ごとに件数 / distinct_event_types /
+// first_event_at / last_event_at を集計し、sort + pagination をかけて返す。
+//
+// /api/analytics/event_types とは grouping キーと distinct カウントの軸が入れ替わった
+// 対称な構造で、`/api/analytics/stats` の `by_user` カウント以上の情報（時刻範囲・
+// distinct event_type 数）を 1 リクエストで取得できる。
+func usersHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+
+	since, err := parseAnalyticsQueryTime(query.Get("since"), "since")
+	if err != nil {
+		log.Printf("Invalid users since: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	until, err := parseAnalyticsQueryTime(query.Get("until"), "until")
+	if err != nil {
+		log.Printf("Invalid users until: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		writeJSONError(w, http.StatusBadRequest, "query parameter 'until' must be greater than or equal to 'since'")
+		return
+	}
+
+	sortField := query.Get("sort")
+	if sortField == "" {
+		sortField = "user_id"
+	}
+	if !allowedUserSortFields[sortField] {
+		log.Printf("Invalid users sort field: %q", sortField)
+		writeJSONError(w, http.StatusBadRequest, "sort must be one of: distinct_event_types, event_count, first_event_at, last_event_at, user_id")
+		return
+	}
+	sortOrder := query.Get("order")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	if !allowedEventSortOrders[sortOrder] {
+		log.Printf("Invalid users sort order: %q", sortOrder)
+		writeJSONError(w, http.StatusBadRequest, "order must be one of: asc, desc")
+		return
+	}
+
+	limit, offset, perr := parseEventsPageQuery(query)
+	if perr != nil {
+		log.Printf("Invalid users pagination: %v", perr)
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return
+	}
+
+	type bucket struct {
+		count      int
+		eventTypes map[string]struct{}
+		first      string
+		last       string
+	}
+	buckets := make(map[string]*bucket)
+
+	mu.RLock()
+	for _, e := range events {
+		if !matchEventFilters(e, "", "", since, until) {
+			continue
+		}
+		b, ok := buckets[e.UserID]
+		if !ok {
+			b = &bucket{eventTypes: make(map[string]struct{})}
+			buckets[e.UserID] = b
+		}
+		b.count++
+		b.eventTypes[e.EventType] = struct{}{}
+		// RFC3339 は固定幅フィールドで文字列比較が時刻順と一致する。
+		if b.first == "" || e.Timestamp < b.first {
+			b.first = e.Timestamp
+		}
+		if e.Timestamp > b.last {
+			b.last = e.Timestamp
+		}
+	}
+	mu.RUnlock()
+
+	result := make([]UserAggregate, 0, len(buckets))
+	for uid, b := range buckets {
+		result = append(result, UserAggregate{
+			UserID:             uid,
+			EventCount:         b.count,
+			DistinctEventTypes: len(b.eventTypes),
+			FirstEventAt:       b.first,
+			LastEventAt:        b.last,
+		})
+	}
+
+	reverse := sortOrder == "desc"
+	primaryLess := func(a, c UserAggregate) (less, equal bool) {
+		switch sortField {
+		case "user_id":
+			return a.UserID < c.UserID, a.UserID == c.UserID
+		case "event_count":
+			return a.EventCount < c.EventCount, a.EventCount == c.EventCount
+		case "distinct_event_types":
+			return a.DistinctEventTypes < c.DistinctEventTypes, a.DistinctEventTypes == c.DistinctEventTypes
+		case "first_event_at":
+			return a.FirstEventAt < c.FirstEventAt, a.FirstEventAt == c.FirstEventAt
+		case "last_event_at":
+			return a.LastEventAt < c.LastEventAt, a.LastEventAt == c.LastEventAt
+		}
+		return false, true
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		a, c := result[i], result[j]
+		less, equal := primaryLess(a, c)
+		if equal {
+			// タイブレーカーは reverse の影響を受けず、常に user_id 昇順。
+			return a.UserID < c.UserID
+		}
+		if reverse {
+			return !less
+		}
+		return less
+	})
+
+	total := len(result)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := result[start:end]
+	if page == nil {
+		page = []UserAggregate{}
+	}
+
+	log.Printf(
+		"Users requested: total=%d returned=%d limit=%d offset=%d sort=%s order=%s",
+		total, len(page), limit, offset, sortField, sortOrder,
+	)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"users":  page,
+		"count":  len(page),
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+		"sort":   sortField,
+		"order":  sortOrder,
+	})
+}
+
 // newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
 func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -772,6 +949,7 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/api/analytics/track", trackHandler)
 	mux.HandleFunc("/api/analytics/stats", statsHandler)
 	mux.HandleFunc("/api/analytics/event_types", eventTypesHandler)
+	mux.HandleFunc("/api/analytics/users", usersHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
 	// 単一イベント取得 / 削除。Go 1.22 の拡張ルーティングで {id} を取り出す。
 	// `/api/analytics/events`（一覧/フィルタ削除）と `/api/analytics/events/{id}`（単発）は
