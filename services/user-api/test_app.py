@@ -1034,3 +1034,136 @@ def test_count_users_no_filter_returns_no_echo_fields(client):
     body = resp.get_json()
     assert "since" not in body
     assert "until" not in body
+
+
+# ---- /api/users/by_domain ----
+
+
+def test_by_domain_empty(client):
+    resp = client.get("/api/users/by_domain")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_domains": 0, "by_domain": []}
+
+
+def test_by_domain_basic_count_descending(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-02-01T00:00:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-03-01T00:00:00+00:00")
+    _register_user_with_created_at("d@other.org", "2024-04-01T00:00:00+00:00")
+    _register_user_with_created_at("e@zzz.io", "2024-05-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 5
+    assert body["distinct_domains"] == 3
+    # count 降順、同 count はドメイン名昇順
+    assert body["by_domain"] == [
+        {"domain": "example.com", "count": 3},
+        {"domain": "other.org", "count": 1},
+        {"domain": "zzz.io", "count": 1},
+    ]
+
+
+def test_by_domain_normalizes_case(client):
+    # 大文字混じりの email でもドメインは小文字化して集計される。
+    _register_user_with_created_at("Alice@Example.COM", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-02-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain")
+    body = resp.get_json()
+    assert body["distinct_domains"] == 1
+    assert body["by_domain"] == [{"domain": "example.com", "count": 2}]
+
+
+def test_by_domain_fallback_for_emails_without_at(client):
+    # `@` を含まない壊れた email は "unknown" にフォールバックする。
+    users_db["broken-email-1"] = {
+        "id": "id-1",
+        "email": "broken-email-1",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "2024-01-01T00:00:00+00:00",
+    }
+    _register_user_with_created_at("ok@example.com", "2024-02-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain")
+    body = resp.get_json()
+    assert body["total"] == 2
+    domains = {item["domain"]: item["count"] for item in body["by_domain"]}
+    assert domains == {"example.com": 1, "unknown": 1}
+
+
+def test_by_domain_filters_by_q_email(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-02-01T00:00:00+00:00")
+    _register_user_with_created_at("alice@other.org", "2024-03-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 2
+    domains = {item["domain"]: item["count"] for item in body["by_domain"]}
+    assert domains == {"example.com": 1, "other.org": 1}
+
+
+def test_by_domain_filters_by_since(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-06-01T00:00:00+00:00")
+    _register_user_with_created_at("c@other.org", "2024-06-15T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain?since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert body["since"] == "2024-03-01T00:00:00Z"
+
+
+def test_by_domain_filters_by_until(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-06-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain?until=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["until"] == "2024-03-01T00:00:00Z"
+
+
+def test_by_domain_rejects_invalid_since(client):
+    resp = client.get("/api/users/by_domain?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_by_domain_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/by_domain?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_by_domain_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/by_domain?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_by_domain_ignores_pagination_params(client):
+    # by_domain は limit / offset / sort / order を解釈しない。
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-02-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain?limit=1&offset=99999&sort=created_at&order=desc")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 2
+
+
+def test_by_domain_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
+
+
+def test_by_domain_tie_break_by_domain_name(client):
+    # 同 count のドメインはドメイン名昇順で並ぶ。
+    _register_user_with_created_at("u1@zzz.io", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("u2@aaa.io", "2024-02-01T00:00:00+00:00")
+    _register_user_with_created_at("u3@mmm.io", "2024-03-01T00:00:00+00:00")
+    resp = client.get("/api/users/by_domain")
+    body = resp.get_json()
+    domains = [item["domain"] for item in body["by_domain"]]
+    assert domains == ["aaa.io", "mmm.io", "zzz.io"]
