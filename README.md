@@ -112,6 +112,8 @@ JWT のみでは削除を許可せず、`current_password` の再入力を要求
 | GET | `/health` | Health check |
 | POST | `/api/analytics/track` | Track an event |
 | GET | `/api/analytics/stats` | Get aggregated statistics |
+| GET | `/api/analytics/event_types` | event_type 別の集計 (event_count / distinct_users / first_event_at / last_event_at) を `sort` / `order` / `limit` / `offset` で取得 |
+| GET | `/api/analytics/users` | user_id 別の集計 (event_count / distinct_event_types / first_event_at / last_event_at) を `sort` / `order` / `limit` / `offset` で取得 |
 | GET | `/api/analytics/events` | List all events |
 | GET | `/api/analytics/events/{id}` | Get a single event by id (404 if not found) |
 | DELETE | `/api/analytics/events` | Delete events by `user_id` / `event_type` / `before` filters |
