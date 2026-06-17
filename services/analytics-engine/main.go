@@ -594,6 +594,17 @@ var allowedEventTypeSortFields = map[string]bool{
 	"last_event_at":  true,
 }
 
+// allowedEventsByDaySortFields は GET /api/analytics/events_by_day の sort= 候補。
+// `event_types` の sort 候補と対称な形（grouping キーが `day` に置き換わる）。
+var allowedEventsByDaySortFields = map[string]bool{
+	"day":                  true,
+	"event_count":          true,
+	"distinct_users":       true,
+	"distinct_event_types": true,
+	"first_event_at":       true,
+	"last_event_at":        true,
+}
+
 // allowedUserSortFields は GET /api/analytics/users の sort= 候補。
 // event_types エンドポイントと並行な命名で揃える（タイブレーカは常に user_id 昇順）。
 var allowedUserSortFields = map[string]bool{
@@ -785,6 +796,201 @@ func eventTypesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// EventsByDayAggregate は events_by_day エンドポイントの 1 要素。
+// `event_types` / `users` ハンドラとの対称性を保つため、JSON タグは
+// 既存集計型と意味的に揃える（first_event_at / last_event_at）。
+type EventsByDayAggregate struct {
+	Day                string `json:"day"`
+	EventCount         int    `json:"event_count"`
+	DistinctUsers      int    `json:"distinct_users"`
+	DistinctEventTypes int    `json:"distinct_event_types"`
+	FirstEventAt       string `json:"first_event_at"`
+	LastEventAt        string `json:"last_event_at"`
+}
+
+// eventsByDayHandler は GET /api/analytics/events_by_day を処理する。
+// 保持中イベントを 1 回スキャンして UTC の `YYYY-MM-DD` ごとに件数 /
+// distinct_users / distinct_event_types / first_event_at / last_event_at
+// を集計し、sort + pagination をかけて返す。`event_types` / `users` の
+// 「対象軸を入れ替えた」対称構造で、時間軸のグルーピングを補完する。
+//
+// クエリ:
+//
+//   - event_type, user_id, since, until: `statsHandler` と同じ filter セマンティクス
+//   - sort: `day` (default), `event_count`, `distinct_users`,
+//     `distinct_event_types`, `first_event_at`, `last_event_at`
+//   - order: `asc` (default), `desc`
+//   - limit, offset: `parseEventsPageQuery` 共通実装
+//
+// タイブレーカーは `day` 昇順（reverse モードでも変えない）。
+func eventsByDayHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+
+	eventType := strings.TrimSpace(query.Get("event_type"))
+	userID := strings.TrimSpace(query.Get("user_id"))
+
+	since, err := parseAnalyticsQueryTime(query.Get("since"), "since")
+	if err != nil {
+		log.Printf("Invalid events_by_day since: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	until, err := parseAnalyticsQueryTime(query.Get("until"), "until")
+	if err != nil {
+		log.Printf("Invalid events_by_day until: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		writeJSONError(w, http.StatusBadRequest, "query parameter 'until' must be greater than or equal to 'since'")
+		return
+	}
+
+	sortField := query.Get("sort")
+	if sortField == "" {
+		sortField = "day"
+	}
+	if !allowedEventsByDaySortFields[sortField] {
+		log.Printf("Invalid events_by_day sort field: %q", sortField)
+		writeJSONError(w, http.StatusBadRequest, "sort must be one of: day, distinct_event_types, distinct_users, event_count, first_event_at, last_event_at")
+		return
+	}
+	sortOrder := query.Get("order")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	if !allowedEventSortOrders[sortOrder] {
+		log.Printf("Invalid events_by_day sort order: %q", sortOrder)
+		writeJSONError(w, http.StatusBadRequest, "order must be one of: asc, desc")
+		return
+	}
+
+	limit, offset, perr := parseEventsPageQuery(query)
+	if perr != nil {
+		log.Printf("Invalid events_by_day pagination: %v", perr)
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return
+	}
+
+	type bucket struct {
+		count      int
+		users      map[string]struct{}
+		eventTypes map[string]struct{}
+		first      string
+		last       string
+	}
+	buckets := make(map[string]*bucket)
+
+	mu.RLock()
+	for _, e := range events {
+		if !matchEventFilters(e, eventType, userID, since, until) {
+			continue
+		}
+		// `Timestamp` は POST 時に RFC3339 に正規化されている前提だが、
+		// 何らかの理由でパースに失敗した場合は当該イベントを集計対象から除外する
+		// （壊れた行で集計全体が崩れないように deny-by-default）。
+		t, perr := parseAnalyticsTime(e.Timestamp)
+		if perr != nil {
+			continue
+		}
+		day := t.UTC().Format("2006-01-02")
+		b, ok := buckets[day]
+		if !ok {
+			b = &bucket{
+				users:      make(map[string]struct{}),
+				eventTypes: make(map[string]struct{}),
+			}
+			buckets[day] = b
+		}
+		b.count++
+		b.users[e.UserID] = struct{}{}
+		b.eventTypes[e.EventType] = struct{}{}
+		if b.first == "" || e.Timestamp < b.first {
+			b.first = e.Timestamp
+		}
+		if e.Timestamp > b.last {
+			b.last = e.Timestamp
+		}
+	}
+	mu.RUnlock()
+
+	result := make([]EventsByDayAggregate, 0, len(buckets))
+	for day, b := range buckets {
+		result = append(result, EventsByDayAggregate{
+			Day:                day,
+			EventCount:         b.count,
+			DistinctUsers:      len(b.users),
+			DistinctEventTypes: len(b.eventTypes),
+			FirstEventAt:       b.first,
+			LastEventAt:        b.last,
+		})
+	}
+
+	reverse := sortOrder == "desc"
+	primaryLess := func(a, c EventsByDayAggregate) (less, equal bool) {
+		switch sortField {
+		case "day":
+			return a.Day < c.Day, a.Day == c.Day
+		case "event_count":
+			return a.EventCount < c.EventCount, a.EventCount == c.EventCount
+		case "distinct_users":
+			return a.DistinctUsers < c.DistinctUsers, a.DistinctUsers == c.DistinctUsers
+		case "distinct_event_types":
+			return a.DistinctEventTypes < c.DistinctEventTypes, a.DistinctEventTypes == c.DistinctEventTypes
+		case "first_event_at":
+			return a.FirstEventAt < c.FirstEventAt, a.FirstEventAt == c.FirstEventAt
+		case "last_event_at":
+			return a.LastEventAt < c.LastEventAt, a.LastEventAt == c.LastEventAt
+		}
+		return false, true
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		a, c := result[i], result[j]
+		less, equal := primaryLess(a, c)
+		if equal {
+			// タイブレーカーは reverse の影響を受けず、常に day 昇順。
+			return a.Day < c.Day
+		}
+		if reverse {
+			return !less
+		}
+		return less
+	})
+
+	total := len(result)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := result[start:end]
+	if page == nil {
+		page = []EventsByDayAggregate{}
+	}
+
+	log.Printf(
+		"EventsByDay requested: total=%d returned=%d limit=%d offset=%d sort=%s order=%s",
+		total, len(page), limit, offset, sortField, sortOrder,
+	)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"by_day": page,
+		"count":  len(page),
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+		"sort":   sortField,
+		"order":  sortOrder,
+	})
+}
+
 // usersHandler は GET /api/analytics/users を処理する。
 // 保持中イベントを 1 回スキャンして user_id ごとに件数 / distinct_event_types /
 // first_event_at / last_event_at を集計し、sort + pagination をかけて返す。
@@ -950,6 +1156,7 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/api/analytics/stats", statsHandler)
 	mux.HandleFunc("/api/analytics/event_types", eventTypesHandler)
 	mux.HandleFunc("/api/analytics/users", usersHandler)
+	mux.HandleFunc("/api/analytics/events_by_day", eventsByDayHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
 	// 単一イベント取得 / 削除。Go 1.22 の拡張ルーティングで {id} を取り出す。
 	// `/api/analytics/events`（一覧/フィルタ削除）と `/api/analytics/events/{id}`（単発）は
