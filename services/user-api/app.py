@@ -682,6 +682,106 @@ def list_users():
     return jsonify(resp)
 
 
+@app.route("/api/users/signups_by_day", methods=["GET"])
+def users_signups_by_day():
+    """登録日 (YYYY-MM-DD, UTC) 別の新規ユーザ登録件数を時系列で返す。
+
+    `/api/users/by_domain` がドメイン別の内訳を返すのと対になり、本エンドポイントは
+    時系列の内訳を返す。UI のユーザ成長グラフ用途を意図しており、`/api/users` で
+    全件取得してフロント側でビニングする運用に比べてペイロード・JSON エンコード時間を
+    大幅に削減できる。
+
+    フィルタは `/api/users/count` / `/api/users/by_domain` と同じ `q` / `since` / `until`。
+    Sort / pagination パラメータは無視する。
+
+    `by_day` は登録日の昇順で固定する（時系列グラフへそのまま流し込めるように）。
+    `created_at` が壊れている／パースできないユーザは `unknown` 日として
+    フォールバック集計する（`by_domain` の `unknown` ドメインと同じ思想）。
+    """
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q on signups_by_day: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since on signups_by_day: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until on signups_by_day: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range on signups_by_day: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
+    counts: dict[str, int] = {}
+    total = 0
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        created_raw = u.get("created_at") if isinstance(u.get("created_at"), str) else None
+        if since_dt is not None or until_dt is not None:
+            if created_raw is None:
+                continue
+            try:
+                created_dt_filter = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt_filter.tzinfo is None:
+                created_dt_filter = created_dt_filter.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt_filter < since_dt:
+                continue
+            if until_dt is not None and created_dt_filter > until_dt:
+                continue
+
+        if created_raw is None:
+            day = "unknown"
+        else:
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                day = "unknown"
+            else:
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                # UTC で正規化してから日付を取り出す。registers の created_at は
+                # `datetime.now(timezone.utc).isoformat()` で書かれる前提だが、
+                # 他 TZ 由来のデータが混じっても UTC へ変換してビニングする。
+                day = created_dt.astimezone(timezone.utc).date().isoformat()
+        counts[day] = counts.get(day, 0) + 1
+        total += 1
+
+    # 日付昇順で固定（時系列グラフへそのまま流せるように）。
+    # `unknown` は ISO 日付 (`YYYY-MM-DD`) の lex 範囲 ("0-9") の後に来るため、
+    # 自然に末尾に並ぶ（時系列軸上は「不明分」として独立表示できる）。
+    sorted_items = sorted(counts.items(), key=lambda kv: kv[0])
+    by_day = [{"day": d, "count": c} for d, c in sorted_items]
+
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    logger.info(
+        "Users signups by day: total=%d distinct=%d (q=%s since=%s until=%s)",
+        total, len(by_day), q, since_raw, until_raw,
+    )
+    resp = {
+        "total": total,
+        "distinct_days": len(by_day),
+        "by_day": by_day,
+    }
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
+
+
 if __name__ == "__main__":
     port = int(os.getenv("USER_API_PORT", "5001"))
     logger.info("Starting user-api on port %d", port)
