@@ -1167,3 +1167,147 @@ def test_by_domain_tie_break_by_domain_name(client):
     body = resp.get_json()
     domains = [item["domain"] for item in body["by_domain"]]
     assert domains == ["aaa.io", "mmm.io", "zzz.io"]
+
+
+# ---- /api/users/signups_by_day ----
+
+
+def test_signups_by_day_empty(client):
+    resp = client.get("/api/users/signups_by_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_days": 0, "by_day": []}
+
+
+def test_signups_by_day_basic_chronological_order(client):
+    _register_user_with_created_at("a@example.com", "2024-01-15T10:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-01-15T23:59:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-01-16T00:01:00+00:00")
+    _register_user_with_created_at("d@example.com", "2024-02-01T05:00:00+00:00")
+    resp = client.get("/api/users/signups_by_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 4
+    assert body["distinct_days"] == 3
+    assert body["by_day"] == [
+        {"day": "2024-01-15", "count": 2},
+        {"day": "2024-01-16", "count": 1},
+        {"day": "2024-02-01", "count": 1},
+    ]
+
+
+def test_signups_by_day_normalizes_to_utc_date(client):
+    # tz オフセット付き created_at は UTC に変換してから日付ビニングされる。
+    # 2024-01-01T23:30:00+09:00 -> UTC は 2024-01-01T14:30:00Z -> day = "2024-01-01"
+    _register_user_with_created_at("jp@example.com", "2024-01-01T23:30:00+09:00")
+    # 2024-01-01T02:30:00-09:00 -> UTC は 2024-01-01T11:30:00Z -> day = "2024-01-01"
+    _register_user_with_created_at("us@example.com", "2024-01-01T02:30:00-09:00")
+    resp = client.get("/api/users/signups_by_day")
+    body = resp.get_json()
+    assert body["by_day"] == [{"day": "2024-01-01", "count": 2}]
+
+
+def test_signups_by_day_fallback_unknown_for_broken_created_at(client):
+    _register_user_with_created_at("ok@example.com", "2024-01-01T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_day")
+    body = resp.get_json()
+    counts = {item["day"]: item["count"] for item in body["by_day"]}
+    assert counts == {"2024-01-01": 1, "unknown": 1}
+
+
+def test_signups_by_day_filters_by_q(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-01-02T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_day?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_day"] == [{"day": "2024-01-01", "count": 1}]
+
+
+def test_signups_by_day_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_day?since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_day"] == [{"day": "2024-06-01", "count": 1}]
+
+
+def test_signups_by_day_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_day?until=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_day"] == [{"day": "2024-01-01", "count": 1}]
+
+
+def test_signups_by_day_rejects_invalid_since(client):
+    resp = client.get("/api/users/signups_by_day?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_signups_by_day_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/signups_by_day?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_signups_by_day_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/signups_by_day?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_signups_by_day_ignores_pagination_params(client):
+    # signups_by_day は limit / offset / sort / order を解釈しない。
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("u2@example.com", "2024-01-02T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_day?limit=1&offset=99999&sort=created_at&order=desc"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert len(body["by_day"]) == 2
+
+
+def test_signups_by_day_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_day")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
+
+
+def test_signups_by_day_echoes_since_until_when_provided(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_day?since=2023-12-01T00:00:00Z&until=2024-12-01T00:00:00Z"
+    )
+    body = resp.get_json()
+    assert body["since"] == "2023-12-01T00:00:00Z"
+    assert body["until"] == "2024-12-01T00:00:00Z"
+
+
+def test_signups_by_day_unknown_sorts_after_dated_days(client):
+    # `unknown` ラベルは ISO 日付の後に並ぶ（lex 比較で "0..9" の後）。
+    _register_user_with_created_at("ok@example.com", "2024-06-01T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_day")
+    body = resp.get_json()
+    days = [item["day"] for item in body["by_day"]]
+    assert days == ["2024-06-01", "unknown"]
