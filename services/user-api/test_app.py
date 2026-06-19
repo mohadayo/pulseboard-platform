@@ -1311,3 +1311,151 @@ def test_signups_by_day_unknown_sorts_after_dated_days(client):
     body = resp.get_json()
     days = [item["day"] for item in body["by_day"]]
     assert days == ["2024-06-01", "unknown"]
+
+
+# ---- /api/users/signups_by_month ----
+
+
+def test_signups_by_month_empty(client):
+    resp = client.get("/api/users/signups_by_month")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_months": 0, "by_month": []}
+
+
+def test_signups_by_month_basic_chronological_order(client):
+    _register_user_with_created_at("a@example.com", "2024-01-15T10:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-01-31T23:59:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-02-01T00:01:00+00:00")
+    _register_user_with_created_at("d@example.com", "2024-06-15T05:00:00+00:00")
+    _register_user_with_created_at("e@example.com", "2025-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_month")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 5
+    assert body["distinct_months"] == 4
+    assert body["by_month"] == [
+        {"month": "2024-01", "count": 2},
+        {"month": "2024-02", "count": 1},
+        {"month": "2024-06", "count": 1},
+        {"month": "2025-01", "count": 1},
+    ]
+
+
+def test_signups_by_month_normalizes_to_utc_month(client):
+    # tz オフセット付き created_at は UTC に変換してから月ビニングされる。
+    # 2024-01-31T23:30:00+09:00 -> UTC は 2024-01-31T14:30:00Z -> month = "2024-01"
+    _register_user_with_created_at("jp@example.com", "2024-01-31T23:30:00+09:00")
+    # 2024-02-01T02:30:00-09:00 -> UTC は 2024-02-01T11:30:00Z -> month = "2024-02"
+    # → 月境界をまたぐ tz オフセットでも UTC で正規化される。
+    _register_user_with_created_at("us@example.com", "2024-02-01T02:30:00-09:00")
+    resp = client.get("/api/users/signups_by_month")
+    body = resp.get_json()
+    assert body["by_month"] == [
+        {"month": "2024-01", "count": 1},
+        {"month": "2024-02", "count": 1},
+    ]
+
+
+def test_signups_by_month_fallback_unknown_for_broken_created_at(client):
+    _register_user_with_created_at("ok@example.com", "2024-01-15T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_month")
+    body = resp.get_json()
+    counts = {item["month"]: item["count"] for item in body["by_month"]}
+    assert counts == {"2024-01": 1, "unknown": 1}
+
+
+def test_signups_by_month_filters_by_q(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-02-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_month?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_month"] == [{"month": "2024-01", "count": 1}]
+
+
+def test_signups_by_month_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_month?since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_month"] == [{"month": "2024-06", "count": 1}]
+
+
+def test_signups_by_month_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_month?until=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_month"] == [{"month": "2024-01", "count": 1}]
+
+
+def test_signups_by_month_rejects_invalid_since(client):
+    resp = client.get("/api/users/signups_by_month?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_signups_by_month_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/signups_by_month?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_signups_by_month_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/signups_by_month?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_signups_by_month_ignores_pagination_params(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("u2@example.com", "2024-02-15T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_month?limit=1&offset=99999&sort=created_at&order=desc"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert len(body["by_month"]) == 2
+
+
+def test_signups_by_month_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_month")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
+
+
+def test_signups_by_month_echoes_since_until_when_provided(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-15T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_month?since=2023-12-01T00:00:00Z&until=2024-12-01T00:00:00Z"
+    )
+    body = resp.get_json()
+    assert body["since"] == "2023-12-01T00:00:00Z"
+    assert body["until"] == "2024-12-01T00:00:00Z"
+
+
+def test_signups_by_month_unknown_sorts_after_dated_months(client):
+    _register_user_with_created_at("ok@example.com", "2024-06-15T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_month")
+    body = resp.get_json()
+    months = [item["month"] for item in body["by_month"]]
+    assert months == ["2024-06", "unknown"]
