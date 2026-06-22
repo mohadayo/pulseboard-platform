@@ -2259,3 +2259,368 @@ func TestEventsByDayHandler_RegisteredOnRouter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
+
+// ---- events_by_hour_of_day ----
+
+func TestEventsByHourOfDayHandler_EmptyStore(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if total, ok := resp["total"].(float64); !ok || total != 0 {
+		t.Fatalf("expected total=0, got %v", resp["total"])
+	}
+	if items, _ := resp["by_hour_of_day"].([]interface{}); len(items) != 0 {
+		t.Fatalf("expected empty by_hour_of_day, got %d items", len(items))
+	}
+	if s, _ := resp["sort"].(string); s != "hour" {
+		t.Fatalf("expected default sort=hour, got %v", resp["sort"])
+	}
+}
+
+func TestEventsByHourOfDayHandler_AggregatesByHour(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "signup", "2026-06-01T01:00:00Z"},
+		{"evt_2", "u2", "click", "2026-06-01T01:30:00Z"},
+		{"evt_3", "u1", "click", "2026-06-02T01:15:00Z"},
+		{"evt_4", "u3", "signup", "2026-06-02T22:00:00Z"},
+		{"evt_5", "u3", "purchase", "2026-06-02T22:30:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+		Total  int                          `json:"total"`
+		Sort   string                       `json:"sort"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("expected total=2 (hours 01 and 22), got %d", resp.Total)
+	}
+	if resp.Sort != "hour" {
+		t.Fatalf("expected sort=hour, got %s", resp.Sort)
+	}
+	if resp.ByHour[0].Hour != "01" || resp.ByHour[0].EventCount != 3 {
+		t.Fatalf("expected first hour=01 count=3, got hour=%q count=%d", resp.ByHour[0].Hour, resp.ByHour[0].EventCount)
+	}
+	if resp.ByHour[0].DistinctUsers != 2 || resp.ByHour[0].DistinctEventTypes != 2 {
+		t.Fatalf("hour 01 distinct mismatch: users=%d types=%d", resp.ByHour[0].DistinctUsers, resp.ByHour[0].DistinctEventTypes)
+	}
+	if resp.ByHour[1].Hour != "22" || resp.ByHour[1].EventCount != 2 {
+		t.Fatalf("expected second hour=22 count=2, got hour=%q count=%d", resp.ByHour[1].Hour, resp.ByHour[1].EventCount)
+	}
+}
+
+func TestEventsByHourOfDayHandler_FilterByEventType(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "signup", "2026-06-01T01:00:00Z"},
+		{"evt_2", "u2", "click", "2026-06-01T02:00:00Z"},
+		{"evt_3", "u3", "signup", "2026-06-01T03:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?event_type=signup", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+		Total  int                          `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 2 {
+		t.Fatalf("expected 2 hours with signup, got total=%d", resp.Total)
+	}
+	for _, b := range resp.ByHour {
+		if b.DistinctEventTypes != 1 {
+			t.Fatalf("expected distinct_event_types=1 (only signup), got %d", b.DistinctEventTypes)
+		}
+	}
+}
+
+func TestEventsByHourOfDayHandler_FilterByUserID(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "click", "2026-06-01T01:00:00Z"},
+		{"evt_2", "u2", "click", "2026-06-01T01:30:00Z"},
+		{"evt_3", "u1", "click", "2026-06-01T05:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?user_id=u1", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Total int `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 2 {
+		t.Fatalf("expected 2 hours for u1 (01 and 05), got %d", resp.Total)
+	}
+}
+
+func TestEventsByHourOfDayHandler_AggregatesCrossDay(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		// 3 events in hour 03 across two different days
+		{"evt_1", "u1", "x", "2026-06-01T03:10:00Z"},
+		{"evt_2", "u2", "x", "2026-06-02T03:20:00Z"},
+		{"evt_3", "u3", "x", "2026-06-03T03:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+		Total  int                          `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 1 {
+		t.Fatalf("expected 1 hour bucket, got %d", resp.Total)
+	}
+	if resp.ByHour[0].Hour != "03" || resp.ByHour[0].EventCount != 3 || resp.ByHour[0].DistinctUsers != 3 {
+		t.Fatalf("expected hour=03 count=3 distinct_users=3, got %+v", resp.ByHour[0])
+	}
+}
+
+func TestEventsByHourOfDayHandler_ConvertsTimezoneToUTC(t *testing.T) {
+	resetState()
+	// JST (+09:00) 10:00 → UTC 01:00 / JST 08:00 → UTC 23:00 (前日)
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T10:00:00+09:00"},
+		{"evt_2", "u2", "x", "2026-06-01T08:00:00+09:00"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+		Total  int                          `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 2 {
+		t.Fatalf("expected 2 hour buckets after UTC normalization, got %d", resp.Total)
+	}
+	hours := map[string]bool{}
+	for _, b := range resp.ByHour {
+		hours[b.Hour] = true
+	}
+	if !hours["01"] || !hours["23"] {
+		t.Fatalf("expected UTC hours 01 and 23, got %v", hours)
+	}
+}
+
+func TestEventsByHourOfDayHandler_SortByEventCountDesc(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T01:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-01T02:00:00Z"},
+		{"evt_3", "u2", "x", "2026-06-01T02:30:00Z"},
+		{"evt_4", "u3", "x", "2026-06-01T02:45:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?sort=event_count&order=desc", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.ByHour[0].Hour != "02" || resp.ByHour[0].EventCount != 3 {
+		t.Fatalf("expected first item hour=02 count=3, got hour=%q count=%d", resp.ByHour[0].Hour, resp.ByHour[0].EventCount)
+	}
+}
+
+func TestEventsByHourOfDayHandler_TieBreakerIsHourAsc(t *testing.T) {
+	resetState()
+	// 全 hour で 1 件ずつ → タイブレーカは hour 昇順、reverse モードでも hour 昇順を保つ
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T03:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-01T01:00:00Z"},
+		{"evt_3", "u1", "x", "2026-06-01T02:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?sort=event_count&order=desc", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.ByHour) != 3 {
+		t.Fatalf("expected 3 buckets, got %d", len(resp.ByHour))
+	}
+	got := []string{resp.ByHour[0].Hour, resp.ByHour[1].Hour, resp.ByHour[2].Hour}
+	want := []string{"01", "02", "03"}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("tiebreaker order mismatch at %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEventsByHourOfDayHandler_SinceUntilFilter(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T01:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-02T05:00:00Z"},
+		{"evt_3", "u1", "x", "2026-06-03T09:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?since=2026-06-02T00:00:00Z&until=2026-06-02T23:59:59Z", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+		Total  int                          `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 1 || resp.ByHour[0].Hour != "05" {
+		t.Fatalf("expected only hour=05, got total=%d (%v)", resp.Total, resp.ByHour)
+	}
+}
+
+func TestEventsByHourOfDayHandler_Pagination(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T01:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-01T02:00:00Z"},
+		{"evt_3", "u1", "x", "2026-06-01T03:00:00Z"},
+		{"evt_4", "u1", "x", "2026-06-01T04:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?limit=2&offset=1", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	var resp struct {
+		ByHour []EventsByHourOfDayAggregate `json:"by_hour_of_day"`
+		Total  int                          `json:"total"`
+		Count  int                          `json:"count"`
+		Limit  int                          `json:"limit"`
+		Offset int                          `json:"offset"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 4 {
+		t.Fatalf("expected total=4 hours, got %d", resp.Total)
+	}
+	if resp.Count != 2 || resp.Limit != 2 || resp.Offset != 1 {
+		t.Fatalf("page metadata mismatch: count=%d limit=%d offset=%d", resp.Count, resp.Limit, resp.Offset)
+	}
+	if resp.ByHour[0].Hour != "02" || resp.ByHour[1].Hour != "03" {
+		t.Fatalf("expected page=[02, 03], got %v", resp.ByHour)
+	}
+}
+
+func TestEventsByHourOfDayHandler_MethodNotAllowed(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/events_by_hour_of_day", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestEventsByHourOfDayHandler_InvalidSortField(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?sort=bogus", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid sort, got %d", w.Code)
+	}
+}
+
+func TestEventsByHourOfDayHandler_InvalidOrder(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?order=bogus", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid order, got %d", w.Code)
+	}
+}
+
+func TestEventsByHourOfDayHandler_SinceGreaterThanUntil(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_hour_of_day?since=2026-06-10T00:00:00Z&until=2026-06-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	eventsByHourOfDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when since > until, got %d", w.Code)
+	}
+}
+
+func TestEventsByHourOfDayHandler_RegisteredOnRouter(t *testing.T) {
+	resetState()
+	seedEvents([]Event{
+		{UserID: "u1", EventType: "click", Timestamp: "2026-06-01T01:00:00Z"},
+	})
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/analytics/events_by_hour_of_day")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
