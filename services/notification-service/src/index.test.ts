@@ -538,6 +538,43 @@ describe("JSON body size limit", () => {
   });
 });
 
+describe("Malformed JSON body", () => {
+  it("returns 400 with JSON error on syntactically invalid JSON", async () => {
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .set("Content-Type", "application/json")
+      .send("{not-json");
+    expect(res.status).toBe(400);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body.error).toBe("invalid JSON body");
+  });
+
+  it("returns 400 on JSON with trailing comma", async () => {
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .set("Content-Type", "application/json")
+      .send('{"user_id":"u","channel":"email",}');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid JSON body");
+  });
+
+  it("returns 400 with JSON content-type but non-JSON body", async () => {
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .set("Content-Type", "application/json")
+      .send("plain text body");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid JSON body");
+  });
+
+  it("does not affect normal JSON parsing (valid body still routes through)", async () => {
+    const res = await request(app)
+      .post("/api/notifications/send")
+      .send({ user_id: "u2", channel: "email", title: "t", message: "m" });
+    expect(res.status).toBe(201);
+  });
+});
+
 describe("DELETE /api/notifications", () => {
   async function seedNotification(
     user_id: string,
