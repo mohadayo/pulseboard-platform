@@ -881,6 +881,106 @@ def users_signups_by_month():
     return jsonify(resp)
 
 
+@app.route("/api/users/signups_by_day_of_week", methods=["GET"])
+def users_signups_by_day_of_week():
+    """登録曜日 (ISO 8601: 1=月曜〜7=日曜, UTC) 別の新規ユーザ登録件数を返す。
+
+    `/api/users/signups_by_day` が「いつ」流量があったかを直線的な時系列で見る
+    のに対し、本エンドポイントは「曜日ごとにどう分布しているか」という周期的
+    パターン（月曜は多い／週末は少ない、等）を 1 リクエストで把握する用途。
+    `analytics-engine` の `/api/analytics/events_by_hour_of_day` と対称な設計。
+
+    フィルタは `/api/users/signups_by_day` / `signups_by_month` と同じ
+    `q` / `since` / `until`。Sort / pagination パラメータは無視する。
+
+    キーは ISO 8601 曜日の文字列 (`"1"`〜`"7"`)。文字列のまま辞書順 = 曜日順に
+    なるため、`unknown` フォールバック（`created_at` がパース不能なユーザ）は
+    数字曜日より後ろに自然に並ぶ。
+    """
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q on signups_by_day_of_week: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since on signups_by_day_of_week: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until on signups_by_day_of_week: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range on signups_by_day_of_week: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
+    counts: dict[str, int] = {}
+    total = 0
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        created_raw = u.get("created_at") if isinstance(u.get("created_at"), str) else None
+        if since_dt is not None or until_dt is not None:
+            if created_raw is None:
+                continue
+            try:
+                created_dt_filter = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt_filter.tzinfo is None:
+                created_dt_filter = created_dt_filter.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt_filter < since_dt:
+                continue
+            if until_dt is not None and created_dt_filter > until_dt:
+                continue
+
+        if created_raw is None:
+            dow = "unknown"
+        else:
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                dow = "unknown"
+            else:
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                # UTC で正規化してから ISO 8601 曜日 (1=月〜7=日) を取り出す。
+                # `isoweekday()` は 1..7 を返すため、tz 越境で曜日が変わる場合も
+                # UTC ベースで一貫した結果が得られる。
+                dow = str(created_dt.astimezone(timezone.utc).isoweekday())
+        counts[dow] = counts.get(dow, 0) + 1
+        total += 1
+
+    # 曜日キー昇順で固定。`"1"`〜`"7"` は数字なので lex 順 = 曜日順、
+    # `"unknown"` は文字列なので末尾に並ぶ（signups_by_day / signups_by_month と
+    # 同じ思想で「不明分」を時系列軸の末尾に独立表示できる）。
+    sorted_items = sorted(counts.items(), key=lambda kv: kv[0])
+    by_day_of_week = [{"day_of_week": d, "count": c} for d, c in sorted_items]
+
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    logger.info(
+        "Users signups by day_of_week: total=%d distinct=%d (q=%s since=%s until=%s)",
+        total, len(by_day_of_week), q, since_raw, until_raw,
+    )
+    resp = {
+        "total": total,
+        "distinct_days_of_week": len(by_day_of_week),
+        "by_day_of_week": by_day_of_week,
+    }
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
+
+
 if __name__ == "__main__":
     port = int(os.getenv("USER_API_PORT", "5001"))
     logger.info("Starting user-api on port %d", port)
