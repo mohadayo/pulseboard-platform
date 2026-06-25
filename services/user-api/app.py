@@ -2,11 +2,12 @@ import os
 import re
 import logging
 import hashlib
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -17,6 +18,45 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("user-api")
+
+
+@app.before_request
+def _access_log_start():
+    """リクエスト着信時刻を Flask の `g` に積み、応答時に消費する。
+
+    ``time.perf_counter()`` を使い、ウォールクロック補正に左右されない
+    単調増加な計測を行う（システムタイムジャンプで負の値にならない）。
+    """
+    g._access_log_start_ns = time.perf_counter_ns()
+
+
+@app.after_request
+def _access_log_end(response):
+    """応答ステータスと処理時間を 1 行の INFO ログに集約する。
+
+    既存の個別ハンドラ内 ``logger.warning(...)`` だけでは「どの HTTP リクエストが
+    来て・どの結果ステータスで・どれだけかかったか」が一貫した軸で追えなかった。
+    全エンドポイント横断で観測できるよう、本ミドルウェアでアクセスログを出力する。
+
+    ``X-Response-Time-Ms`` ヘッダにも同値を返し、クライアント側 (BFF / SPA)
+    からも応答時間が読み取れるようにする。``g._access_log_start_ns`` が未設定の
+    場合は ``before_request`` を経ない経路 (例: WSGI スタックの極端な例外時)
+    なので duration を出さずに早期 return する。
+    """
+    start_ns = getattr(g, "_access_log_start_ns", None)
+    if start_ns is None:
+        return response
+    duration_ms = round((time.perf_counter_ns() - start_ns) / 1_000_000.0, 3)
+    logger.info(
+        "%s %s -> %d (%.3fms)",
+        request.method,
+        request.path,
+        response.status_code,
+        duration_ms,
+    )
+    response.headers["X-Response-Time-Ms"] = f"{duration_ms}"
+    return response
+
 
 SECRET_KEY = os.getenv("JWT_SECRET", "pulseboard-dev-secret")
 TOKEN_EXPIRY_HOURS = int(os.getenv("TOKEN_EXPIRY_HOURS", "24"))
