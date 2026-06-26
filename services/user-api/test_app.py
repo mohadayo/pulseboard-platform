@@ -1611,3 +1611,172 @@ def test_signups_by_day_of_week_unknown_sorts_after_dated_days(client):
     body = resp.get_json()
     days = [item["day_of_week"] for item in body["by_day_of_week"]]
     assert days == ["1", "unknown"]
+
+
+# ---- /api/users/signups_by_hour_of_day ----
+
+
+def test_signups_by_hour_of_day_empty(client):
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_hours": 0, "by_hour_of_day": []}
+
+
+def test_signups_by_hour_of_day_basic_chronological_order(client):
+    _register_user_with_created_at("a@example.com", "2024-01-01T00:30:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-01-01T09:15:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-01-02T09:45:00+00:00")
+    _register_user_with_created_at("d@example.com", "2024-01-03T23:00:00+00:00")
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 4
+    assert body["distinct_hours"] == 3
+    # キーは 2 桁数字なので lex 順 = 時刻順
+    assert body["by_hour_of_day"] == [
+        {"hour": "00", "count": 1},
+        {"hour": "09", "count": 2},
+        {"hour": "23", "count": 1},
+    ]
+
+
+def test_signups_by_hour_of_day_normalizes_to_utc(client):
+    # 2024-01-01T01:30:00+09:00 -> UTC 2023-12-31T16:30:00 -> hour="16"
+    _register_user_with_created_at("jp@example.com", "2024-01-01T01:30:00+09:00")
+    # 2024-01-01T03:00:00-05:00 -> UTC 2024-01-01T08:00:00 -> hour="08"
+    _register_user_with_created_at("us@example.com", "2024-01-01T03:00:00-05:00")
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    body = resp.get_json()
+    counts = {item["hour"]: item["count"] for item in body["by_hour_of_day"]}
+    assert counts == {"16": 1, "08": 1}
+
+
+def test_signups_by_hour_of_day_naive_treated_as_utc(client):
+    # tz 情報なしは UTC として扱う（signups_by_day_of_week と同じ）
+    _register_user_with_created_at("naive@example.com", "2024-01-01T14:30:00")
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    body = resp.get_json()
+    assert body["by_hour_of_day"] == [{"hour": "14", "count": 1}]
+
+
+def test_signups_by_hour_of_day_fallback_unknown_for_broken_created_at(client):
+    _register_user_with_created_at("ok@example.com", "2024-01-01T05:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    body = resp.get_json()
+    counts = {item["hour"]: item["count"] for item in body["by_hour_of_day"]}
+    assert counts == {"05": 1, "unknown": 1}
+
+
+def test_signups_by_hour_of_day_filters_by_q(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-01T03:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-01-01T04:00:00+00:00")
+    resp = client.get("/api/users/signups_by_hour_of_day?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_hour_of_day"] == [{"hour": "03", "count": 1}]
+
+
+def test_signups_by_hour_of_day_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T01:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-15T12:00:00+00:00")
+    resp = client.get("/api/users/signups_by_hour_of_day?since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_hour_of_day"] == [{"hour": "12", "count": 1}]
+
+
+def test_signups_by_hour_of_day_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2024-01-01T01:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-15T12:00:00+00:00")
+    resp = client.get("/api/users/signups_by_hour_of_day?until=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_hour_of_day"] == [{"hour": "01", "count": 1}]
+
+
+def test_signups_by_hour_of_day_rejects_invalid_since(client):
+    resp = client.get("/api/users/signups_by_hour_of_day?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_signups_by_hour_of_day_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/signups_by_hour_of_day?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_signups_by_hour_of_day_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/signups_by_hour_of_day?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_signups_by_hour_of_day_ignores_pagination_params(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T01:00:00+00:00")
+    _register_user_with_created_at("u2@example.com", "2024-01-01T02:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_hour_of_day?limit=1&offset=99999&sort=created_at&order=desc"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert len(body["by_hour_of_day"]) == 2
+
+
+def test_signups_by_hour_of_day_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T01:00:00+00:00")
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
+
+
+def test_signups_by_hour_of_day_echoes_since_until_when_provided(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-15T01:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_hour_of_day?since=2023-12-01T00:00:00Z&until=2024-12-01T00:00:00Z"
+    )
+    body = resp.get_json()
+    assert body["since"] == "2023-12-01T00:00:00Z"
+    assert body["until"] == "2024-12-01T00:00:00Z"
+
+
+def test_signups_by_hour_of_day_unknown_sorts_after_dated_hours(client):
+    _register_user_with_created_at("ok@example.com", "2024-01-01T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    body = resp.get_json()
+    hours = [item["hour"] for item in body["by_hour_of_day"]]
+    assert hours == ["00", "unknown"]
+
+
+def test_signups_by_hour_of_day_full_24_hour_distribution(client):
+    # 0:00, 6:00, 12:00, 18:00 を別々の日付で登録 → 4 つの distinct な時刻
+    _register_user_with_created_at("h00@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("h06@example.com", "2024-01-02T06:00:00+00:00")
+    _register_user_with_created_at("h12@example.com", "2024-01-03T12:00:00+00:00")
+    _register_user_with_created_at("h18@example.com", "2024-01-04T18:00:00+00:00")
+    resp = client.get("/api/users/signups_by_hour_of_day")
+    body = resp.get_json()
+    assert body["total"] == 4
+    assert body["distinct_hours"] == 4
+    assert body["by_hour_of_day"] == [
+        {"hour": "00", "count": 1},
+        {"hour": "06", "count": 1},
+        {"hour": "12", "count": 1},
+        {"hour": "18", "count": 1},
+    ]
