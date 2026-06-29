@@ -42,13 +42,59 @@ export const app = express();
 app.use(cors());
 app.use(express.json({ limit: MAX_REQUEST_BODY }));
 
+// ログレベル優先度。値が大きいほど重要度が高い。`currentLogLevel` 以上の
+// 重要度を持つメッセージのみが出力される（INFO 設定なら DEBUG は抑止される）。
+const LOG_LEVEL_PRIORITY: Record<string, number> = {
+  DEBUG: 10,
+  INFO: 20,
+  WARN: 30,
+  ERROR: 40,
+};
+
+// `LOG_LEVEL` 環境変数を解釈してレベル優先度に変換する。
+// `user-api` の同名 env と運用を揃え、大文字小文字・前後空白の表記揺れを
+// 吸収しつつ、不正値・空・未指定は INFO へフォールバックする。
+export function parseLogLevel(raw: string | undefined | null): number {
+  if (raw === undefined || raw === null) {
+    return LOG_LEVEL_PRIORITY.INFO;
+  }
+  const normalized = raw.trim().toUpperCase();
+  const priority = LOG_LEVEL_PRIORITY[normalized];
+  if (typeof priority !== "number") {
+    return LOG_LEVEL_PRIORITY.INFO;
+  }
+  return priority;
+}
+
+// 現在のログレベル。プロセス起動時に LOG_LEVEL から 1 回だけ読む。
+// テストからは `setLogLevel(...)` で動的に上書きできる。
+let currentLogLevel: number = parseLogLevel(process.env.LOG_LEVEL);
+
+export function setLogLevel(level: string | undefined | null): void {
+  currentLogLevel = parseLogLevel(level);
+}
+
+export function getLogLevel(): number {
+  return currentLogLevel;
+}
+
+// 指定 level の重要度が `currentLogLevel` 以上のときのみ出力する。
+// 例: currentLogLevel=INFO (20) のとき、DEBUG (10) は出力されない。
+// 未知のレベル文字列は安全側に倒して INFO 相当として扱う（既存呼び出しの後方互換）。
 const log = (level: string, msg: string) => {
+  const priority = LOG_LEVEL_PRIORITY[level.toUpperCase()] ?? LOG_LEVEL_PRIORITY.INFO;
+  if (priority < currentLogLevel) {
+    return;
+  }
   const ts = new Date().toISOString();
   console.log(`${ts} [${level}] notification-service: ${msg}`);
 };
 
 app.get("/health", (_req: Request, res: Response) => {
-  log("INFO", "Health check requested");
+  // /health は K8s probe / ロードバランサから高頻度に呼ばれるため、
+  // DEBUG レベルでのみ出力し既定運用ではノイズに埋もれないようにする。
+  // `user-api` の `logger.debug("Health check requested")` と運用を揃える。
+  log("DEBUG", "Health check requested");
   res.json({
     status: "healthy",
     service: "notification-service",
