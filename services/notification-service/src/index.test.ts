@@ -746,3 +746,168 @@ describe("DELETE /api/notifications", () => {
     expect(remain.status).toBe(200);
   });
 });
+
+// LOG_LEVEL のレベルフィルタとヘルスチェック抑制のテストブロック。
+// `console.log` を spy してフィルタの効きを観測する。
+// `setLogLevel` はモジュール変数 `currentLogLevel` を直接書き換えるため、
+// 各テストで望むレベルへ切り替え、`afterEach` で INFO（デフォルト）へ戻す。
+describe("LOG_LEVEL filtering", () => {
+  let logSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    // テスト間の独立性: 既定状態 (INFO) に戻す。
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require("./index").setLogLevel("INFO");
+  });
+
+  describe("parseLogLevel", () => {
+    it("accepts DEBUG / INFO / WARN / ERROR (case-insensitive)", () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { parseLogLevel } = require("./index");
+      expect(parseLogLevel("DEBUG")).toBe(10);
+      expect(parseLogLevel("debug")).toBe(10);
+      expect(parseLogLevel("  Debug  ")).toBe(10);
+      expect(parseLogLevel("INFO")).toBe(20);
+      expect(parseLogLevel("info")).toBe(20);
+      expect(parseLogLevel("WARN")).toBe(30);
+      expect(parseLogLevel("ERROR")).toBe(40);
+    });
+
+    it("falls back to INFO for invalid / empty / null / undefined", () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { parseLogLevel } = require("./index");
+      expect(parseLogLevel("")).toBe(20);
+      expect(parseLogLevel("trace")).toBe(20);
+      expect(parseLogLevel("WARNING")).toBe(20); // 短縮形のみ受理 (WARN)
+      expect(parseLogLevel("unknown")).toBe(20);
+      expect(parseLogLevel(undefined)).toBe(20);
+      expect(parseLogLevel(null)).toBe(20);
+    });
+  });
+
+  describe("setLogLevel / getLogLevel", () => {
+    it("changes currentLogLevel for subsequent log calls", () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel, getLogLevel } = require("./index");
+      setLogLevel("DEBUG");
+      expect(getLogLevel()).toBe(10);
+      setLogLevel("ERROR");
+      expect(getLogLevel()).toBe(40);
+      setLogLevel("INFO");
+      expect(getLogLevel()).toBe(20);
+    });
+  });
+
+  describe("GET /health logging", () => {
+    it("does not log at INFO level (default)", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel } = require("./index");
+      setLogLevel("INFO");
+      logSpy.mockClear();
+
+      const res = await request(app).get("/health");
+      expect(res.status).toBe(200);
+
+      const healthLogs = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes("Health check requested"));
+      expect(healthLogs).toHaveLength(0);
+    });
+
+    it("logs at DEBUG level", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel } = require("./index");
+      setLogLevel("DEBUG");
+      logSpy.mockClear();
+
+      const res = await request(app).get("/health");
+      expect(res.status).toBe(200);
+
+      const healthLogs = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes("Health check requested"));
+      expect(healthLogs.length).toBeGreaterThan(0);
+    });
+
+    it("does not log at WARN or ERROR level (above INFO)", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel } = require("./index");
+      for (const level of ["WARN", "ERROR"]) {
+        setLogLevel(level);
+        logSpy.mockClear();
+        await request(app).get("/health");
+        const healthLogs = logSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((line) => line.includes("Health check requested"));
+        expect(healthLogs).toHaveLength(0);
+      }
+    });
+  });
+
+  describe("regression: INFO and WARN logs still emit at INFO level", () => {
+    it("emits INFO log for successful notification send", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel } = require("./index");
+      setLogLevel("INFO");
+      logSpy.mockClear();
+
+      const res = await request(app).post("/api/notifications/send").send({
+        user_id: "u1",
+        channel: "email",
+        title: "T",
+        message: "M",
+      });
+      expect(res.status).toBe(201);
+
+      const sentLogs = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes("Notification sent"));
+      expect(sentLogs.length).toBeGreaterThan(0);
+    });
+
+    it("emits WARN log for invalid channel even at INFO level", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel } = require("./index");
+      setLogLevel("INFO");
+      logSpy.mockClear();
+
+      const res = await request(app).post("/api/notifications/send").send({
+        user_id: "u1",
+        channel: "telegram",
+        title: "T",
+        message: "M",
+      });
+      expect(res.status).toBe(400);
+
+      const warnLogs = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes("Invalid channel"));
+      expect(warnLogs.length).toBeGreaterThan(0);
+    });
+
+    it("suppresses WARN logs when LOG_LEVEL=ERROR", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { setLogLevel } = require("./index");
+      setLogLevel("ERROR");
+      logSpy.mockClear();
+
+      const res = await request(app).post("/api/notifications/send").send({
+        user_id: "u1",
+        channel: "telegram",
+        title: "T",
+        message: "M",
+      });
+      expect(res.status).toBe(400);
+
+      const warnLogs = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes("Invalid channel"));
+      expect(warnLogs).toHaveLength(0);
+    });
+  });
+});
