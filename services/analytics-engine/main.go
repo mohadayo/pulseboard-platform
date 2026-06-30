@@ -595,7 +595,7 @@ var allowedEventTypeSortFields = map[string]bool{
 }
 
 // allowedEventsByDaySortFields は GET /api/analytics/events_by_day の sort= 候補。
-// `event_types` の sort 候補と対称な形（grouping キーが `day` に置き換わる）。
+// `event_types` の sort 候補と対称な形(grouping キーが `day` に置き換わる)。
 var allowedEventsByDaySortFields = map[string]bool{
 	"day":                  true,
 	"event_count":          true,
@@ -609,6 +609,18 @@ var allowedEventsByDaySortFields = map[string]bool{
 // `events_by_day` の sort 候補と対称（grouping キーが `hour` に置き換わる）。
 var allowedEventsByHourOfDaySortFields = map[string]bool{
 	"hour":                 true,
+	"event_count":          true,
+	"distinct_users":       true,
+	"distinct_event_types": true,
+	"first_event_at":       true,
+	"last_event_at":        true,
+}
+
+// allowedEventsByDayOfWeekSortFields は GET /api/analytics/events_by_day_of_week の sort= 候補。
+// `events_by_hour_of_day` の sort 候補と対称（grouping キーが `day_of_week` に置き換わる）。
+// 曜日値は ISO 8601 の "1"=Mon 〜 "7"=Sun の 1 桁文字列として lex 順 = 曜日順を保つ。
+var allowedEventsByDayOfWeekSortFields = map[string]bool{
+	"day_of_week":          true,
 	"event_count":          true,
 	"distinct_users":       true,
 	"distinct_event_types": true,
@@ -1351,6 +1363,218 @@ func eventsByHourOfDayHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// EventsByDayOfWeekAggregate は events_by_day_of_week エンドポイントの 1 要素。
+// `EventsByHourOfDayAggregate` と対称（grouping キーが ISO 8601 曜日値の 1 桁
+// 文字列 "1"=Mon 〜 "7"=Sun に置き換わる）。
+type EventsByDayOfWeekAggregate struct {
+	DayOfWeek          string `json:"day_of_week"`
+	EventCount         int    `json:"event_count"`
+	DistinctUsers      int    `json:"distinct_users"`
+	DistinctEventTypes int    `json:"distinct_event_types"`
+	FirstEventAt       string `json:"first_event_at"`
+	LastEventAt        string `json:"last_event_at"`
+}
+
+// isoWeekdayString は `time.Time` を ISO 8601 曜日文字列 ("1"=Mon 〜 "7"=Sun) へ変換する。
+// Go 標準の `time.Weekday()` は `time.Sunday = 0` 〜 `time.Saturday = 6` を返すため、
+// ISO 規約 (Mon = 1, Sun = 7) に正規化する：
+//   - Sunday  (0) → "7"
+//   - Monday  (1) → "1"
+//   - ...
+//   - Saturday(6) → "6"
+//
+// `user-api/signups_by_day_of_week` (Python `isoweekday()` 由来) と値を揃えるため、
+// クライアントは 2 サービスを横断しても同じキーで突き合わせ可能。
+func isoWeekdayString(t time.Time) string {
+	wd := int(t.Weekday())
+	if wd == 0 {
+		return "7"
+	}
+	return strconv.Itoa(wd)
+}
+
+// eventsByDayOfWeekHandler は GET /api/analytics/events_by_day_of_week を処理する。
+// 保持中イベントを 1 回スキャンして **UTC の ISO 8601 曜日** ("1"=月曜 〜 "7"=日曜) ごとに
+// 件数 / distinct_users / distinct_event_types / first_event_at / last_event_at を集計し、
+// sort + pagination をかけて返す。
+//
+// `/api/analytics/events_by_day` が「いつ流量があったか」の日次時系列を見るのに対し、
+// 本ハンドラは「週のうち、どの曜日に流量が集中しているか」の **周期パターン** を
+// 1 リクエストで把握するための集計。`user-api/signups_by_day_of_week` と対称で、
+// プラットフォーム全体の曜日傾向 (新規登録 + イベント) を 2 リクエストで取れる。
+//
+// 集計キーは `"1"`〜`"7"` の 1 桁文字列。文字列のまま辞書順 = 曜日順を保つ
+// （`events_by_day` の `"YYYY-MM-DD"` と同じ思想）。母集団 0 の曜日は配列に含めない
+// （populated-only 方針）。
+func eventsByDayOfWeekHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+
+	eventType := strings.TrimSpace(query.Get("event_type"))
+	userID := strings.TrimSpace(query.Get("user_id"))
+
+	since, err := parseAnalyticsQueryTime(query.Get("since"), "since")
+	if err != nil {
+		log.Printf("Invalid events_by_day_of_week since: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	until, err := parseAnalyticsQueryTime(query.Get("until"), "until")
+	if err != nil {
+		log.Printf("Invalid events_by_day_of_week until: %v", err)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		writeJSONError(w, http.StatusBadRequest, "query parameter 'until' must be greater than or equal to 'since'")
+		return
+	}
+
+	sortField := query.Get("sort")
+	if sortField == "" {
+		sortField = "day_of_week"
+	}
+	if !allowedEventsByDayOfWeekSortFields[sortField] {
+		log.Printf("Invalid events_by_day_of_week sort field: %q", sortField)
+		writeJSONError(w, http.StatusBadRequest, "sort must be one of: day_of_week, distinct_event_types, distinct_users, event_count, first_event_at, last_event_at")
+		return
+	}
+	sortOrder := query.Get("order")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	if !allowedEventSortOrders[sortOrder] {
+		log.Printf("Invalid events_by_day_of_week sort order: %q", sortOrder)
+		writeJSONError(w, http.StatusBadRequest, "order must be one of: asc, desc")
+		return
+	}
+
+	limit, offset, perr := parseEventsPageQuery(query)
+	if perr != nil {
+		log.Printf("Invalid events_by_day_of_week pagination: %v", perr)
+		writeJSONError(w, http.StatusBadRequest, perr.Error())
+		return
+	}
+
+	type bucket struct {
+		count      int
+		users      map[string]struct{}
+		eventTypes map[string]struct{}
+		first      string
+		last       string
+	}
+	buckets := make(map[string]*bucket)
+
+	mu.RLock()
+	for _, e := range events {
+		if !matchEventFilters(e, eventType, userID, since, until) {
+			continue
+		}
+		// `Timestamp` は POST 時に RFC3339 に正規化されている前提だが、何らかの理由で
+		// パースに失敗した場合は当該イベントを集計から除外する（events_by_hour_of_day と
+		// 同じ deny-by-default 防御）。
+		t, perr := parseAnalyticsTime(e.Timestamp)
+		if perr != nil {
+			continue
+		}
+		dow := isoWeekdayString(t.UTC())
+		b, ok := buckets[dow]
+		if !ok {
+			b = &bucket{
+				users:      make(map[string]struct{}),
+				eventTypes: make(map[string]struct{}),
+			}
+			buckets[dow] = b
+		}
+		b.count++
+		b.users[e.UserID] = struct{}{}
+		b.eventTypes[e.EventType] = struct{}{}
+		if b.first == "" || e.Timestamp < b.first {
+			b.first = e.Timestamp
+		}
+		if e.Timestamp > b.last {
+			b.last = e.Timestamp
+		}
+	}
+	mu.RUnlock()
+
+	result := make([]EventsByDayOfWeekAggregate, 0, len(buckets))
+	for dow, b := range buckets {
+		result = append(result, EventsByDayOfWeekAggregate{
+			DayOfWeek:          dow,
+			EventCount:         b.count,
+			DistinctUsers:      len(b.users),
+			DistinctEventTypes: len(b.eventTypes),
+			FirstEventAt:       b.first,
+			LastEventAt:        b.last,
+		})
+	}
+
+	reverse := sortOrder == "desc"
+	primaryLess := func(a, c EventsByDayOfWeekAggregate) (less, equal bool) {
+		switch sortField {
+		case "day_of_week":
+			return a.DayOfWeek < c.DayOfWeek, a.DayOfWeek == c.DayOfWeek
+		case "event_count":
+			return a.EventCount < c.EventCount, a.EventCount == c.EventCount
+		case "distinct_users":
+			return a.DistinctUsers < c.DistinctUsers, a.DistinctUsers == c.DistinctUsers
+		case "distinct_event_types":
+			return a.DistinctEventTypes < c.DistinctEventTypes, a.DistinctEventTypes == c.DistinctEventTypes
+		case "first_event_at":
+			return a.FirstEventAt < c.FirstEventAt, a.FirstEventAt == c.FirstEventAt
+		case "last_event_at":
+			return a.LastEventAt < c.LastEventAt, a.LastEventAt == c.LastEventAt
+		}
+		return false, true
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		a, c := result[i], result[j]
+		less, equal := primaryLess(a, c)
+		if equal {
+			// タイブレーカは reverse の影響を受けず、常に day_of_week 昇順。
+			// `events_by_hour_of_day` と同じ規約で揃える。
+			return a.DayOfWeek < c.DayOfWeek
+		}
+		if reverse {
+			return !less
+		}
+		return less
+	})
+
+	total := len(result)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	page := result[start:end]
+	if page == nil {
+		page = []EventsByDayOfWeekAggregate{}
+	}
+
+	log.Printf(
+		"EventsByDayOfWeek requested: total=%d returned=%d limit=%d offset=%d sort=%s order=%s",
+		total, len(page), limit, offset, sortField, sortOrder,
+	)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"by_day_of_week": page,
+		"count":          len(page),
+		"total":          total,
+		"limit":          limit,
+		"offset":         offset,
+		"sort":           sortField,
+		"order":          sortOrder,
+	})
+}
+
 // newRouter はエンドポイントを登録した mux を返す（テスト容易性のため分離）。
 func newRouter() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -1361,6 +1585,7 @@ func newRouter() *http.ServeMux {
 	mux.HandleFunc("/api/analytics/users", usersHandler)
 	mux.HandleFunc("/api/analytics/events_by_day", eventsByDayHandler)
 	mux.HandleFunc("/api/analytics/events_by_hour_of_day", eventsByHourOfDayHandler)
+	mux.HandleFunc("/api/analytics/events_by_day_of_week", eventsByDayOfWeekHandler)
 	mux.HandleFunc("/api/analytics/events", eventsHandler)
 	// 単一イベント取得 / 削除。Go 1.22 の拡張ルーティングで {id} を取り出す。
 	// `/api/analytics/events`（一覧/フィルタ削除）と `/api/analytics/events/{id}`（単発）は
