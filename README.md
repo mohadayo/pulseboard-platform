@@ -114,6 +114,9 @@ JWT のみでは削除を許可せず、`current_password` の再入力を要求
 | GET | `/api/analytics/stats` | Get aggregated statistics |
 | GET | `/api/analytics/event_types` | event_type 別の集計 (event_count / distinct_users / first_event_at / last_event_at) を `sort` / `order` / `limit` / `offset` で取得 |
 | GET | `/api/analytics/users` | user_id 別の集計 (event_count / distinct_event_types / first_event_at / last_event_at) を `sort` / `order` / `limit` / `offset` で取得 |
+| GET | `/api/analytics/events_by_day` | UTC 日付 (`YYYY-MM-DD`) ごとの集計 (event_count / distinct_users / distinct_event_types / first_event_at / last_event_at) を `sort` / `order` / `limit` / `offset` / `min_event_count` で取得 |
+| GET | `/api/analytics/events_by_hour_of_day` | UTC 時刻 (`00`〜`23`) ごとの集計を返す（曜日・日付を跨いで統合） |
+| GET | `/api/analytics/events_by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) ごとの集計を返す |
 | GET | `/api/analytics/events` | List all events |
 | GET | `/api/analytics/events/{id}` | Get a single event by id (404 if not found) |
 | DELETE | `/api/analytics/events` | Delete events by `user_id` / `event_type` / `before` filters |
