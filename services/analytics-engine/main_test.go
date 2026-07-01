@@ -2260,6 +2260,219 @@ func TestEventsByDayHandler_RegisteredOnRouter(t *testing.T) {
 	}
 }
 
+// ---- events_by_day min_event_count filter ----
+
+// min_event_count 未指定は既定 0 と同じで、全バケットを返す（後方互換）。
+func TestEventsByDayHandler_MinEventCountDefaultIncludesAll(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-02T00:00:00Z"},
+		{"evt_3", "u2", "x", "2026-06-02T01:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByDay []EventsByDayAggregate `json:"by_day"`
+		Total int                    `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 2 || len(resp.ByDay) != 2 {
+		t.Fatalf("expected total=2 len=2, got total=%d len=%d", resp.Total, len(resp.ByDay))
+	}
+}
+
+// min_event_count=0 は明示的な既定値で、全バケットを返す（除外なし）。
+func TestEventsByDayHandler_MinEventCountZeroIncludesAll(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-02T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=0", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByDay []EventsByDayAggregate `json:"by_day"`
+		Total int                    `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 2 {
+		t.Fatalf("expected total=2, got %d", resp.Total)
+	}
+}
+
+// min_event_count=N で `event_count < N` のバケットが除外される。
+func TestEventsByDayHandler_MinEventCountFiltersLowCountBuckets(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		// 6/1: 1 件, 6/2: 3 件, 6/3: 2 件
+		{"evt_1", "u1", "x", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-02T00:00:00Z"},
+		{"evt_3", "u2", "x", "2026-06-02T01:00:00Z"},
+		{"evt_4", "u3", "x", "2026-06-02T02:00:00Z"},
+		{"evt_5", "u1", "x", "2026-06-03T00:00:00Z"},
+		{"evt_6", "u2", "x", "2026-06-03T01:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=2", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByDay []EventsByDayAggregate `json:"by_day"`
+		Total int                    `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	// 6/1 (count=1) は除外され、6/2 (count=3) と 6/3 (count=2) だけが残る。
+	if resp.Total != 2 {
+		t.Fatalf("expected total=2 after filter, got %d", resp.Total)
+	}
+	days := []string{}
+	for _, a := range resp.ByDay {
+		days = append(days, a.Day)
+	}
+	want := []string{"2026-06-02", "2026-06-03"}
+	for i, d := range want {
+		if i >= len(days) || days[i] != d {
+			t.Fatalf("expected days=%v, got %v", want, days)
+		}
+	}
+}
+
+// min_event_count=N の境界: `event_count == N` のバケットは含まれる（`<` 判定なので）。
+func TestEventsByDayHandler_MinEventCountBoundaryIsInclusive(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u2", "x", "2026-06-01T01:00:00Z"},
+	})
+	// count == 2 のバケットに対し min_event_count=2 → 通過する（境界包含）。
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=2", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByDay []EventsByDayAggregate `json:"by_day"`
+		Total int                    `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 1 || len(resp.ByDay) != 1 || resp.ByDay[0].EventCount != 2 {
+		t.Fatalf("expected 1 bucket count=2 at boundary, got total=%d body=%+v", resp.Total, resp.ByDay)
+	}
+}
+
+// min_event_count が全バケットを除外した場合、空配列と total=0 を返す（200 のまま）。
+func TestEventsByDayHandler_MinEventCountExcludesAllReturnsEmpty(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T00:00:00Z"},
+		{"evt_2", "u1", "x", "2026-06-02T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=99", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		ByDay []EventsByDayAggregate `json:"by_day"`
+		Total int                    `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 0 || len(resp.ByDay) != 0 {
+		t.Fatalf("expected total=0 len=0, got total=%d len=%d", resp.Total, len(resp.ByDay))
+	}
+}
+
+// 負値の min_event_count は 400 を返す。
+func TestEventsByDayHandler_MinEventCountNegativeReturns400(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=-1", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on negative min_event_count, got %d", w.Code)
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "min_event_count must be a non-negative integer" {
+		t.Fatalf("unexpected error message: %q", resp["error"])
+	}
+}
+
+// 整数でない min_event_count は 400 を返す。
+func TestEventsByDayHandler_MinEventCountNonIntegerReturns400(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=abc", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on non-integer min_event_count, got %d", w.Code)
+	}
+}
+
+// 空文字の min_event_count は未指定と同じ扱い（既定 0 = 除外なし）。
+func TestEventsByDayHandler_MinEventCountEmptyStringIsDefault(t *testing.T) {
+	resetState()
+	seedEventsAt([]struct {
+		ID        string
+		UserID    string
+		EventType string
+		Timestamp string
+	}{
+		{"evt_1", "u1", "x", "2026-06-01T00:00:00Z"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/events_by_day?min_event_count=", nil)
+	w := httptest.NewRecorder()
+	eventsByDayHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on empty min_event_count, got %d", w.Code)
+	}
+	var resp struct {
+		Total int `json:"total"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Total != 1 {
+		t.Fatalf("expected total=1, got %d", resp.Total)
+	}
+}
+
 // ---- events_by_hour_of_day ----
 
 func TestEventsByHourOfDayHandler_EmptyStore(t *testing.T) {

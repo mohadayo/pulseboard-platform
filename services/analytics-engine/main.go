@@ -844,6 +844,8 @@ type EventsByDayAggregate struct {
 //     `distinct_event_types`, `first_event_at`, `last_event_at`
 //   - order: `asc` (default), `desc`
 //   - limit, offset: `parseEventsPageQuery` 共通実装
+//   - min_event_count: `event_count` がこの値未満のバケットを応答から除外する
+//     （既定 0 = 除外なし）。低件数の日を隠したいダッシュボード用途向け。
 //
 // タイブレーカーは `day` 昇順（reverse モードでも変えない）。
 func eventsByDayHandler(w http.ResponseWriter, r *http.Request) {
@@ -899,6 +901,21 @@ func eventsByDayHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// min_event_count は「event_count が閾値未満のバケットを応答から除外する」フィルタ。
+	// ダッシュボードで低ノイズ日を隠す用途を想定。空 / 未指定は 0（除外なし）。
+	// 負値と整数以外は 400 で拒否する（`parseEventsPageQuery` の limit/offset と同じ規約）。
+	// 除外は sort・pagination の前に適用するため、`total` は絞り込み後のカウントを返す。
+	minEventCount := 0
+	if vs, ok := query["min_event_count"]; ok && len(vs) > 0 && vs[0] != "" {
+		n, perr := strconv.Atoi(vs[0])
+		if perr != nil || n < 0 {
+			log.Printf("Invalid events_by_day min_event_count: %q", vs[0])
+			writeJSONError(w, http.StatusBadRequest, "min_event_count must be a non-negative integer")
+			return
+		}
+		minEventCount = n
+	}
+
 	type bucket struct {
 		count      int
 		users      map[string]struct{}
@@ -943,6 +960,11 @@ func eventsByDayHandler(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]EventsByDayAggregate, 0, len(buckets))
 	for day, b := range buckets {
+		// `min_event_count` 未満のバケットはこの時点で除外し、後段の sort/pagination
+		// および `total` から完全に見えなくする。既定値 0 の場合は全バケット通過。
+		if b.count < minEventCount {
+			continue
+		}
 		result = append(result, EventsByDayAggregate{
 			Day:                day,
 			EventCount:         b.count,
