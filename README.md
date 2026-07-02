@@ -189,7 +189,7 @@ See [`.env.example`](.env.example) for all available configuration options.
 | `NOTIFICATION_PORT` | `5003` | Notification Service listen port |
 | `MAX_NOTIFICATIONS` | `10000` | Notification Service: max in-memory notifications (FIFO eviction、`0` 以下で無制限) |
 | `MAX_REQUEST_BODY` | `256kb` | Notification Service: `express.json` のリクエストボディサイズ上限 |
-| `LOG_LEVEL` | `INFO` | Log verbosity level (`DEBUG` / `INFO` / `WARN` / `ERROR`). `user-api` と `notification-service` の双方で参照される。`INFO`（既定）では `/health` のアクセスログが抑止され、K8s probe / ロードバランサ probe のノイズログを除去する。`DEBUG` で詳細ログを有効化。大文字小文字を無視し、不正値・空・未指定は `INFO` にフォールバック |
+| `LOG_LEVEL` | `INFO` | Log verbosity level (`DEBUG` / `INFO` / `WARN` / `ERROR`). `user-api` / `analytics-engine` / `notification-service` の 3 サービスで参照される（`analytics-engine` は `DEBUG` / それ以外の 2 値のみを解釈）。`INFO`（既定）では `/health` のアクセスログが抑止され、K8s probe / ロードバランサ probe のノイズログを除去する。`DEBUG` で詳細ログを有効化。大文字小文字を無視し、不正値・空・未指定は `INFO` にフォールバック |
 
 ## CI/CD
 

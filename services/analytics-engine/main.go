@@ -116,7 +116,10 @@ func getEnvInt(key string, fallback int) int {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("Health check requested")
+	// /health は K8s probe / ロードバランサから高頻度に呼ばれるため、
+	// DEBUG レベルでのみ出力し既定運用ではノイズに埋もれないようにする。
+	// sibling サービス `user-api` の `logger.debug("Health check requested")` と運用を揃える。
+	logDebug("Health check requested")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":    "healthy",
