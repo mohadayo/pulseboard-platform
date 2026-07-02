@@ -2,8 +2,18 @@ package main
 
 import (
 	"log"
+	"os"
 	"strings"
 )
+
+// init は LOG_LEVEL 環境変数を起動時に 1 回だけ読み currentLogLevel に固定する。
+// main() 側での明示的な初期化を不要にすることで、main.go への変更を最小化する
+// （テストからは currentLogLevel を直接書き換えて挙動を切り替えられる）。
+// 実行中の切り替えは想定しない（sighup 経由の再読み込み等が必要な場合は
+// 別途拡張する）。未設定 / 空 / 不正値は INFO へフォールバック。
+func init() {
+	currentLogLevel = parseLogLevel(os.Getenv("LOG_LEVEL"))
+}
 
 // logLevel は analytics-engine 内で使う最小限のログレベル。
 // Go 標準 `log` パッケージはレベル概念を持たないため、ヘルスチェック等の
