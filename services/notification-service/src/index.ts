@@ -457,6 +457,59 @@ app.delete("/api/notifications", (req: Request, res: Response) => {
   });
 });
 
+// フィルタ通過後の通知を UTC 日付 (YYYY-MM-DD) でビニングし、
+// 日付昇順の時系列カウントを返す軽量集計エンドポイント。
+//
+// `/api/notifications/summary` が channel / status 別の合計を返すのに対し、
+// 本エンドポイントは「いつどれだけ送られたか」の日次推移を返す。
+// `/api/notifications` 全件取得 → クライアント集計に比べて、保持件数が
+// 増えた状況でのペイロード量・JSON エンコード時間を削減する。
+//
+// バケットキーは `created_at` を UTC 化した `YYYY-MM-DD`。lex 昇順 = カレンダー
+// 昇順を保つ（trilingual-gateway analytics-py の by_day / usermgmt-ts の by_day と同じ規約）。
+// populated-only: 母集団 0 の日は含めない。破損した created_at (パース不能) は
+// `applyListFilters` と同じ防御方針で集計対象外とする。
+//
+// `/:id` より前に登録して、`:id == "by_day"` の衝突を防ぐ。
+app.get("/api/notifications/by_day", (req: Request, res: Response) => {
+  const parsed = parseListFilters(req);
+  if (!parsed.ok) {
+    log("WARN", `Invalid by_day filter: ${parsed.error}`);
+    res.status(parsed.status).json({ error: parsed.error });
+    return;
+  }
+
+  const result = applyListFilters(notifications, parsed);
+
+  // UTC 日付キー ("YYYY-MM-DD") → 件数。
+  // 破損した created_at はスキップ（applyListFilters と同じ防御）。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const n of result) {
+    const ts = new Date(n.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const key = ts.toISOString().slice(0, 10);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 日付キーの lex 昇順 = カレンダー昇順（"2026-06-30" < "2026-07-01"）。
+  // populated-only: 件数 0 の日は含めない。
+  const byDay = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([day, count]) => ({ day, count }));
+
+  log(
+    "INFO",
+    `by_day requested: total=${total} distinct_days=${byDay.length} user_id=${parsed.userId ?? "-"} channel=${parsed.channel ?? "-"} status=${parsed.status ?? "-"}`,
+  );
+  res.json({
+    total,
+    distinct_days: byDay.length,
+    by_day: byDay,
+  });
+});
+
 app.get("/api/notifications/:id", (req: Request, res: Response) => {
   const notification = notifications.find((n) => n.id === req.params.id);
   if (!notification) {

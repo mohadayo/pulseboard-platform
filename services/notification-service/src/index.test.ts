@@ -474,6 +474,127 @@ describe("GET /api/notifications/summary", () => {
   });
 });
 
+describe("GET /api/notifications/by_day", () => {
+  beforeEach(() => {
+    clearNotifications();
+  });
+
+  const send = (channel: "email" | "sms" | "push" = "email", user_id = "u1") =>
+    request(app).post("/api/notifications/send").send({
+      user_id,
+      channel,
+      title: "T",
+      message: "M",
+    });
+
+  it("returns empty aggregation when store is empty", async () => {
+    const res = await request(app).get("/api/notifications/by_day");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ total: 0, distinct_days: 0, by_day: [] });
+  });
+
+  it("groups notifications by UTC date", async () => {
+    // POST は new Date().toISOString() で書き込むため、実行時刻の 1 日
+    // だけが含まれる。総件数と distinct_days の関係のみを検証する。
+    await send();
+    await send();
+    await send();
+    const res = await request(app).get("/api/notifications/by_day");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3);
+    // 同一プロセス内で連続 POST するため通常は 1 日に収まる。日跨ぎのタイミング
+    // で 2 日にまたがる可能性は残るので `<= 2` で緩めに検証する。
+    expect(res.body.distinct_days).toBeGreaterThanOrEqual(1);
+    expect(res.body.distinct_days).toBeLessThanOrEqual(2);
+    expect(res.body.by_day.length).toBe(res.body.distinct_days);
+    const summedCount = res.body.by_day.reduce(
+      (acc: number, row: { count: number }) => acc + row.count,
+      0,
+    );
+    expect(summedCount).toBe(3);
+  });
+
+  it("returns keys as YYYY-MM-DD strings in lex ascending order", async () => {
+    await send();
+    await send();
+    const res = await request(app).get("/api/notifications/by_day");
+    expect(res.status).toBe(200);
+    for (const row of res.body.by_day) {
+      // ISO 日付 (YYYY-MM-DD) の 10 文字を検証。
+      expect(row.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+    // lex 昇順 = カレンダー昇順を検証（連続日でも同一日でも成り立つ）。
+    const days = res.body.by_day.map((row: { day: string }) => row.day);
+    const sorted = [...days].sort();
+    expect(days).toEqual(sorted);
+  });
+
+  it("filters by user_id", async () => {
+    await send("email", "u1");
+    await send("email", "u1");
+    await send("sms", "u2");
+    const res = await request(app).get("/api/notifications/by_day?user_id=u1");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("filters by channel", async () => {
+    await send("email");
+    await send("sms");
+    await send("push");
+    const res = await request(app).get("/api/notifications/by_day?channel=email");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+  });
+
+  it("respects since/until filters", async () => {
+    await send();
+    await new Promise((r) => setTimeout(r, 10));
+    const cutoff = new Date(Date.now()).toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+    await send();
+    await send();
+    const res = await request(app).get(
+      `/api/notifications/by_day?since=${encodeURIComponent(cutoff)}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("rejects invalid channel with 400", async () => {
+    const res = await request(app).get("/api/notifications/by_day?channel=bogus");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid status with 400", async () => {
+    const res = await request(app).get("/api/notifications/by_day?status=bogus");
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid since with 400", async () => {
+    const res = await request(app).get("/api/notifications/by_day?since=not-a-date");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("since");
+  });
+
+  it("rejects since > until with 400", async () => {
+    const res = await request(app).get(
+      "/api/notifications/by_day?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("until");
+  });
+
+  it("does not collide with /:id lookup route", async () => {
+    // "/api/notifications/by_day" は上位で by_day handler にマッチし、
+    // 404 になる /:id handler に落ちないことを確認する（登録順序の回帰防止）。
+    const res = await request(app).get("/api/notifications/by_day");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("by_day");
+    expect(res.body).not.toHaveProperty("error");
+  });
+});
+
 describe("In-memory store cap (MAX_NOTIFICATIONS)", () => {
   const ORIGINAL_CAP = getMaxNotifications();
   afterEach(() => {
