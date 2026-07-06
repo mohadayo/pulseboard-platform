@@ -595,6 +595,143 @@ describe("GET /api/notifications/by_day", () => {
   });
 });
 
+describe("GET /api/notifications/by_hour_of_day", () => {
+  beforeEach(() => {
+    clearNotifications();
+  });
+
+  const send = (channel: "email" | "sms" | "push" = "email", user_id = "u1") =>
+    request(app).post("/api/notifications/send").send({
+      user_id,
+      channel,
+      title: "T",
+      message: "M",
+    });
+
+  it("returns empty aggregation when store is empty", async () => {
+    const res = await request(app).get("/api/notifications/by_hour_of_day");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      total: 0,
+      distinct_hours: 0,
+      by_hour_of_day: [],
+    });
+  });
+
+  it("groups notifications by UTC hour and preserves totals", async () => {
+    // POST 経由は new Date().toISOString() で書き込むため、実行時刻の 1 時間
+    // だけが含まれることが多い。総件数と distinct_hours の関係のみを検証する。
+    await send();
+    await send();
+    await send();
+    const res = await request(app).get("/api/notifications/by_hour_of_day");
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3);
+    // 同一プロセス内で連続 POST するため通常は 1 時間内に収まるが、時 hour 跨ぎ
+    // (:59:59 → :00:00) のタイミングで 2 時間に分かれる可能性は残るため <=2 で緩める。
+    expect(res.body.distinct_hours).toBeGreaterThanOrEqual(1);
+    expect(res.body.distinct_hours).toBeLessThanOrEqual(2);
+    expect(res.body.by_hour_of_day.length).toBe(res.body.distinct_hours);
+    const summedCount = res.body.by_hour_of_day.reduce(
+      (acc: number, row: { count: number }) => acc + row.count,
+      0,
+    );
+    expect(summedCount).toBe(3);
+  });
+
+  it("returns keys as 2-digit zero-padded HH strings in lex ascending order", async () => {
+    await send();
+    await send();
+    const res = await request(app).get("/api/notifications/by_hour_of_day");
+    expect(res.status).toBe(200);
+    for (const row of res.body.by_hour_of_day) {
+      // 2 桁ゼロ詰め時刻 ("00"〜"23") の 2 文字を検証。
+      expect(row.hour).toMatch(/^[0-2]\d$/);
+    }
+    // 2 桁ゼロ詰めの lex 昇順 = 時間順を検証。
+    const hours = res.body.by_hour_of_day.map(
+      (row: { hour: string }) => row.hour,
+    );
+    const sorted = [...hours].sort();
+    expect(hours).toEqual(sorted);
+  });
+
+  it("filters by user_id", async () => {
+    await send("email", "u1");
+    await send("email", "u1");
+    await send("sms", "u2");
+    const res = await request(app).get(
+      "/api/notifications/by_hour_of_day?user_id=u1",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("filters by channel", async () => {
+    await send("email");
+    await send("sms");
+    await send("push");
+    const res = await request(app).get(
+      "/api/notifications/by_hour_of_day?channel=email",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+  });
+
+  it("respects since/until filters", async () => {
+    await send();
+    await new Promise((r) => setTimeout(r, 10));
+    const cutoff = new Date(Date.now()).toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+    await send();
+    await send();
+    const res = await request(app).get(
+      `/api/notifications/by_hour_of_day?since=${encodeURIComponent(cutoff)}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+  });
+
+  it("rejects invalid channel with 400", async () => {
+    const res = await request(app).get(
+      "/api/notifications/by_hour_of_day?channel=bogus",
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid status with 400", async () => {
+    const res = await request(app).get(
+      "/api/notifications/by_hour_of_day?status=bogus",
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid since with 400", async () => {
+    const res = await request(app).get(
+      "/api/notifications/by_hour_of_day?since=not-a-date",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("since");
+  });
+
+  it("rejects since > until with 400", async () => {
+    const res = await request(app).get(
+      "/api/notifications/by_hour_of_day?since=2026-01-01T00:00:00Z&until=2024-01-01T00:00:00Z",
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("until");
+  });
+
+  it("does not collide with /:id lookup route", async () => {
+    // "/api/notifications/by_hour_of_day" は上位で by_hour_of_day handler にマッチし、
+    // /:id handler に落ちないことを確認する（登録順序の回帰防止）。
+    const res = await request(app).get("/api/notifications/by_hour_of_day");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("by_hour_of_day");
+    expect(res.body).not.toHaveProperty("error");
+  });
+});
+
 describe("In-memory store cap (MAX_NOTIFICATIONS)", () => {
   const ORIGINAL_CAP = getMaxNotifications();
   afterEach(() => {
