@@ -510,6 +510,62 @@ app.get("/api/notifications/by_day", (req: Request, res: Response) => {
   });
 });
 
+// フィルタ通過後の通知を UTC 時刻 ("00"〜"23") でビニングし、時刻昇順の
+// 周期的カウントを返す軽量集計エンドポイント。
+//
+// `/api/notifications/by_day` が「いつ」流量があったかを直線時系列で見るのに対し、
+// 本エンドポイントは「1 日のうち、どの時間帯に流量が集中しているか」を 1
+// リクエストで把握する周期的集計。深夜バッチ / 朝の通知ピーク / 送信ワーカーの
+// キャパシティプラン用途を想定する。既存 `/by_day` と同一のフィルタセット
+// (`user_id` / `channel` / `status` / `since` / `until`) を再利用する。
+//
+// バケットキーは `created_at` を UTC 化した 2 桁ゼロ詰め時刻 (`"00"`〜`"23"`)。
+// lex 順 = 時間順を保つ。populated-only: 母集団 0 の時間帯は含めない。
+// 破損した created_at (パース不能) は `applyListFilters` と同じ防御方針で
+// 集計対象外とする。
+//
+// `/:id` より前に登録して、`:id == "by_hour_of_day"` の衝突を防ぐ。
+app.get("/api/notifications/by_hour_of_day", (req: Request, res: Response) => {
+  const parsed = parseListFilters(req);
+  if (!parsed.ok) {
+    log("WARN", `Invalid by_hour_of_day filter: ${parsed.error}`);
+    res.status(parsed.status).json({ error: parsed.error });
+    return;
+  }
+
+  const result = applyListFilters(notifications, parsed);
+
+  // UTC 時刻キー ("00"〜"23") → 件数。
+  // 破損した created_at はスキップ（applyListFilters と同じ防御）。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const n of result) {
+    const ts = new Date(n.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    // toISOString() の 12〜13 文字目が UTC 時刻の 2 桁 (例: "2026-06-20T10:00:00.000Z" → "10")。
+    // getUTCHours() を padStart しても同じだが、by_day が toISOString().slice(0,10) を使っており、
+    // slice ベースで揃えることで tz 越境時の挙動を目視で追いやすくする。
+    const key = ts.toISOString().slice(11, 13);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // 2 桁ゼロ詰め時刻 ("00"〜"23") は lex 順 = 時間順なので単純に sort で十分。
+  const byHourOfDay = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([hour, count]) => ({ hour, count }));
+
+  log(
+    "INFO",
+    `by_hour_of_day requested: total=${total} distinct_hours=${byHourOfDay.length} user_id=${parsed.userId ?? "-"} channel=${parsed.channel ?? "-"} status=${parsed.status ?? "-"}`,
+  );
+  res.json({
+    total,
+    distinct_hours: byHourOfDay.length,
+    by_hour_of_day: byHourOfDay,
+  });
+});
+
 app.get("/api/notifications/:id", (req: Request, res: Response) => {
   const notification = notifications.find((n) => n.id === req.params.id);
   if (!notification) {
