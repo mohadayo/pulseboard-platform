@@ -1461,6 +1461,177 @@ def test_signups_by_month_unknown_sorts_after_dated_months(client):
     assert months == ["2024-06", "unknown"]
 
 
+# ---- /api/users/signups_by_week ----
+
+
+def test_signups_by_week_empty(client):
+    resp = client.get("/api/users/signups_by_week")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_weeks": 0, "by_week": []}
+
+
+def test_signups_by_week_basic_chronological_order(client):
+    # ISO 週規則: 2024-01-01 (月) は 2024-W01。以下は各週の代表日:
+    # 2024-W01 (月): 2024-01-01
+    # 2024-W02 (月): 2024-01-08
+    # 2024-W05 (月): 2024-01-29, 2024-02-04 (日)
+    # 2024-W25 (中頃): 2024-06-17
+    _register_user_with_created_at("a@example.com", "2024-01-01T10:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2024-01-08T10:00:00+00:00")
+    _register_user_with_created_at("c@example.com", "2024-01-29T10:00:00+00:00")
+    _register_user_with_created_at("d@example.com", "2024-02-04T23:00:00+00:00")
+    _register_user_with_created_at("e@example.com", "2024-06-17T05:00:00+00:00")
+    resp = client.get("/api/users/signups_by_week")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 5
+    assert body["distinct_weeks"] == 4
+    assert body["by_week"] == [
+        {"week": "2024-W01", "count": 1},
+        {"week": "2024-W02", "count": 1},
+        {"week": "2024-W05", "count": 2},
+        {"week": "2024-W25", "count": 1},
+    ]
+
+
+def test_signups_by_week_normalizes_to_utc_week(client):
+    # 2024-06-23 (日) 23:30 JST -> UTC 14:30 -> ISO 週 2024-W25 (日曜側)
+    _register_user_with_created_at("jp@example.com", "2024-06-23T23:30:00+09:00")
+    # 2024-06-24 (月) 02:30 -09:00 -> UTC 11:30 -> ISO 週 2024-W26 (月曜側)
+    _register_user_with_created_at("us@example.com", "2024-06-24T02:30:00-09:00")
+    resp = client.get("/api/users/signups_by_week")
+    body = resp.get_json()
+    assert body["by_week"] == [
+        {"week": "2024-W25", "count": 1},
+        {"week": "2024-W26", "count": 1},
+    ]
+
+
+def test_signups_by_week_handles_iso_year_boundary(client):
+    # 2027-01-01 (金) は ISO 8601 では 2026-W53 に属する
+    # （その週の月曜 12/28 と木曜 12/31 が 2026 年側なので）
+    _register_user_with_created_at("y2026@example.com", "2026-12-30T00:00:00+00:00")
+    _register_user_with_created_at("y2027@example.com", "2027-01-01T00:00:00+00:00")
+    _register_user_with_created_at("y2027w01@example.com", "2027-01-05T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_week")
+    body = resp.get_json()
+    weeks = {item["week"]: item["count"] for item in body["by_week"]}
+    # 2026-12-30 と 2027-01-01 は共に ISO 2026-W53 に属する
+    assert weeks.get("2026-W53") == 2
+    # 2027-01-05 (月) は ISO 2027-W01
+    assert weeks.get("2027-W01") == 1
+
+
+def test_signups_by_week_fallback_unknown_for_broken_created_at(client):
+    _register_user_with_created_at("ok@example.com", "2024-01-15T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_week")
+    body = resp.get_json()
+    counts = {item["week"]: item["count"] for item in body["by_week"]}
+    assert counts.get("unknown") == 1
+    # 2024-01-15 は月曜 → 2024-W03
+    assert counts.get("2024-W03") == 1
+
+
+def test_signups_by_week_filters_by_q(client):
+    _register_user_with_created_at("alice@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-02-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_week?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 1
+    # 2024-01-15 は月曜 → 2024-W03
+    assert body["by_week"] == [{"week": "2024-W03", "count": 1}]
+
+
+def test_signups_by_week_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-17T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_week?since=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    # 2024-06-17 は月曜 → 2024-W25
+    assert body["by_week"] == [{"week": "2024-W25", "count": 1}]
+
+
+def test_signups_by_week_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2024-01-15T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-17T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_week?until=2024-03-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_week"] == [{"week": "2024-W03", "count": 1}]
+
+
+def test_signups_by_week_rejects_invalid_since(client):
+    resp = client.get("/api/users/signups_by_week?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_signups_by_week_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/signups_by_week?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_signups_by_week_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/signups_by_week?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_signups_by_week_ignores_pagination_params(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    _register_user_with_created_at("u2@example.com", "2024-02-15T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_week?limit=1&offset=99999&sort=created_at&order=desc"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert len(body["by_week"]) == 2
+
+
+def test_signups_by_week_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_week")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
+
+
+def test_signups_by_week_echoes_since_until_when_provided(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-15T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_week?since=2023-12-01T00:00:00Z&until=2024-12-01T00:00:00Z"
+    )
+    body = resp.get_json()
+    assert body["since"] == "2023-12-01T00:00:00Z"
+    assert body["until"] == "2024-12-01T00:00:00Z"
+
+
+def test_signups_by_week_unknown_sorts_after_dated_weeks(client):
+    _register_user_with_created_at("ok@example.com", "2024-06-17T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_week")
+    body = resp.get_json()
+    weeks = [item["week"] for item in body["by_week"]]
+    # unknown は数字 (ISO 週の "0"-"9") の後に来るため末尾に並ぶ
+    assert weeks == ["2024-W25", "unknown"]
+
+
 # ---- /api/users/signups_by_day_of_week ----
 
 
