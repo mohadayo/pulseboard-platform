@@ -921,6 +921,109 @@ def users_signups_by_month():
     return jsonify(resp)
 
 
+@app.route("/api/users/signups_by_week", methods=["GET"])
+def users_signups_by_week():
+    """登録週 (ISO 週フォーマット YYYY-Www, UTC) 別の新規ユーザ登録件数を時系列で返す。
+
+    `signups_by_day` が日単位、`signups_by_month` が月単位なのに対し、その中間解像度である
+    週単位 (ISO 8601 week) を提供する。四半期・半期スパンでの登録推移を「日次だと点が
+    多過ぎ、月次だと粗過ぎ」というギャップ無く 1 リクエストで取得できる。
+
+    バケットキーは `created_at` を UTC 正規化して `strftime("%G-W%V")` で ISO 週フォーマット
+    に丸めた文字列（例: `"2026-W27"`）。`%G` は ISO 週数ベースの年、`%V` は 2 桁ゼロ詰めの
+    ISO 週番号（週の初日は月曜、年跨ぎ規則は ISO 8601）。lex 昇順 = カレンダー週昇順を
+    保つため、追加のソートキー変換は不要。
+
+    フィルタは `signups_by_day` / `signups_by_month` と同じ `q` / `since` / `until`。
+    Sort / pagination パラメータは無視する（既存 `by_day` / `by_month` と整合）。
+
+    `by_week` は登録週の昇順で固定する（時系列グラフへそのまま流し込めるように）。
+    `created_at` が壊れている／パースできないユーザは `unknown` 週として
+    フォールバック集計する（`signups_by_day` の `unknown` 日と同じ思想）。
+    """
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q on signups_by_week: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since on signups_by_week: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until on signups_by_week: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range on signups_by_week: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
+    counts: dict[str, int] = {}
+    total = 0
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        created_raw = u.get("created_at") if isinstance(u.get("created_at"), str) else None
+        if since_dt is not None or until_dt is not None:
+            if created_raw is None:
+                continue
+            try:
+                created_dt_filter = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt_filter.tzinfo is None:
+                created_dt_filter = created_dt_filter.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt_filter < since_dt:
+                continue
+            if until_dt is not None and created_dt_filter > until_dt:
+                continue
+
+        if created_raw is None:
+            week = "unknown"
+        else:
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                week = "unknown"
+            else:
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                # UTC で正規化してから ISO 週フォーマット (YYYY-Www) を取り出す。
+                # %G / %V は ISO 8601 週規則を実装しており、年跨ぎ週も
+                # 「木曜が属する年」を年として採用する。
+                week = created_dt.astimezone(timezone.utc).strftime("%G-W%V")
+        counts[week] = counts.get(week, 0) + 1
+        total += 1
+
+    # 週昇順で固定。`unknown` は ISO 週フォーマット ("YYYY-Www") の lex 範囲 ("0-9") の後に
+    # 来るため、`signups_by_day` / `signups_by_month` と同じく自然に末尾に並ぶ。
+    sorted_items = sorted(counts.items(), key=lambda kv: kv[0])
+    by_week = [{"week": w, "count": c} for w, c in sorted_items]
+
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    logger.info(
+        "Users signups by week: total=%d distinct=%d (q=%s since=%s until=%s)",
+        total, len(by_week), q, since_raw, until_raw,
+    )
+    resp = {
+        "total": total,
+        "distinct_weeks": len(by_week),
+        "by_week": by_week,
+    }
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
+
+
 @app.route("/api/users/signups_by_day_of_week", methods=["GET"])
 def users_signups_by_day_of_week():
     """登録曜日 (ISO 8601: 1=月曜〜7=日曜, UTC) 別の新規ユーザ登録件数を返す。
