@@ -566,6 +566,79 @@ app.get("/api/notifications/by_hour_of_day", (req: Request, res: Response) => {
   });
 });
 
+// ISO 曜日番号 ("1"..."7") と UI 表示用 3 文字ラベルの対応表。
+// 月曜始まりで日曜が最後。lex 昇順 ("1"..."7") = 月〜日順を保つ。
+// 他リポジトリ (pulseboard-app api-gateway) の by_day_of_week と表記を揃える。
+const WEEKDAY_NAMES: Record<string, string> = {
+  "1": "Mon",
+  "2": "Tue",
+  "3": "Wed",
+  "4": "Thu",
+  "5": "Fri",
+  "6": "Sat",
+  "7": "Sun",
+};
+
+// フィルタ通過後の通知を UTC 曜日 ("1" 月曜〜"7" 日曜) でビニングし、
+// 月〜日順の周期的カウントを返す軽量集計エンドポイント。
+//
+// `/api/notifications/by_hour_of_day` が「1 日のうちどの時間帯」の周期を見るのに対し、
+// 本エンドポイントは「1 週間のうちどの曜日に流量が集中しているか」を 1 リクエストで
+// 返す粗い周期軸。土日と平日で通知配信傾向が変わる SaaS 的ワークロードでの
+// 週末フラット化検知や、月曜バッチ集中の可視化を想定する。既存 `/by_day` `/by_hour_of_day`
+// と同一のフィルタセット (`user_id` / `channel` / `status` / `since` / `until`) を再利用する。
+//
+// バケットキーは `created_at` を UTC 化して算出した ISO 曜日番号 (`"1"` 月〜 `"7"` 日) の
+// 文字列。`Date.getUTCDay()` は 0=Sun...6=Sat を返すので、`((getUTCDay() + 6) % 7) + 1`
+// で月曜起点の 1..7 に写す。lex 昇順 = 月〜日順を保つ。各行には `day` (曜日番号) に加え、
+// UI で存在チェック不要のラベル用に `weekday_name` ("Mon"..."Sun") を付ける。
+// populated-only: 母集団 0 の曜日は含めない（`by_day` / `by_hour_of_day` と同じ規約）。
+// 破損した created_at (パース不能) は `applyListFilters` と同じ防御方針で集計対象外とする。
+//
+// `/:id` より前に登録して、`:id == "by_day_of_week"` の衝突を防ぐ。
+app.get("/api/notifications/by_day_of_week", (req: Request, res: Response) => {
+  const parsed = parseListFilters(req);
+  if (!parsed.ok) {
+    log("WARN", `Invalid by_day_of_week filter: ${parsed.error}`);
+    res.status(parsed.status).json({ error: parsed.error });
+    return;
+  }
+
+  const result = applyListFilters(notifications, parsed);
+
+  // ISO 曜日番号 ("1"..."7") → 件数。破損 created_at はスキップ。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const n of result) {
+    const ts = new Date(n.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    // getUTCDay(): 0 (Sun) 〜 6 (Sat) を、ISO 8601 の 1 (Mon) 〜 7 (Sun) に写像する。
+    const iso = ((ts.getUTCDay() + 6) % 7) + 1;
+    const key = String(iso);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // "1".."7" は lex 順 = 月〜日順なので単純 sort で十分。
+  const byDayOfWeek = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([day, count]) => ({
+      day,
+      weekday_name: WEEKDAY_NAMES[day],
+      count,
+    }));
+
+  log(
+    "INFO",
+    `by_day_of_week requested: total=${total} distinct_days_of_week=${byDayOfWeek.length} user_id=${parsed.userId ?? "-"} channel=${parsed.channel ?? "-"} status=${parsed.status ?? "-"}`,
+  );
+  res.json({
+    total,
+    distinct_days_of_week: byDayOfWeek.length,
+    by_day_of_week: byDayOfWeek,
+  });
+});
+
 app.get("/api/notifications/:id", (req: Request, res: Response) => {
   const notification = notifications.find((n) => n.id === req.params.id);
   if (!notification) {
