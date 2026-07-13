@@ -1,0 +1,118 @@
+# Dependabot 設定
+# 全マイクロサービスの依存パッケージを週次で監視する。
+
+version: 2
+
+updates:
+  # analytics-engine (Go)
+  - package-ecosystem: "gomod"
+    directory: "/services/analytics-engine"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(analytics-engine)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "go"
+      - "analytics-engine"
+
+  # notification-service (Node.js / TypeScript)
+  - package-ecosystem: "npm"
+    directory: "/services/notification-service"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(notification-service)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "notification-service"
+
+  # user-api (Python)
+  - package-ecosystem: "pip"
+    directory: "/services/user-api"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(user-api)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+      - "user-api"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Docker (各サービスの Dockerfile を監視)
+  - package-ecosystem: "docker"
+    directory: "/services/analytics-engine"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(analytics-engine)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/services/notification-service"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(notification-service)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/services/user-api"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(user-api)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
