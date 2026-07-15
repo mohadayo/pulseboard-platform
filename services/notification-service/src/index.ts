@@ -639,6 +639,83 @@ app.get("/api/notifications/by_day_of_week", (req: Request, res: Response) => {
   });
 });
 
+// ISO 8601 週キー ("YYYY-Www") を UTC 基準で算出するヘルパ。
+//
+// JavaScript には Python の `strftime("%G-W%V")` に相当する組み込みがないため、
+// 標準アルゴリズムで手計算する:
+//   1. `d` を UTC の日付だけコピーして時刻を落とす（時刻依存で週跨ぎが揺れないよう）。
+//   2. `d.getUTCDay()` は 0=Sun...6=Sat。ISO では 1=Mon...7=Sun なので `|| 7` で
+//      0 (Sun) を 7 に写す。
+//   3. ISO 週は「木曜日が属する週」の年・週番号を採用する規則。よって
+//      `d` を最も近い木曜日 (dayNum-1 が差分、+4 で木曜) にシフトする。
+//   4. その木曜日の属する年の 1/1 との差分日数 / 7 を切り上げると ISO 週番号。
+//   5. 年跨ぎ規則: 12/29..12/31 が 1/1 と同一週にある場合、その週は翌年の W01。
+//      逆に 1/1..1/3 が 12/31 と同一週にある場合、その週は前年の W53 (または W52)。
+//      木曜シフト後の `d.getUTCFullYear()` がそのまま ISO 年になる。
+function isoWeekKey(ts: Date): string {
+  const d = new Date(Date.UTC(ts.getUTCFullYear(), ts.getUTCMonth(), ts.getUTCDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+}
+
+// フィルタ通過後の通知を ISO 8601 週 ("YYYY-Www") でビニングし、週昇順の
+// 線形時系列カウントを返す集計エンドポイント。
+//
+// `/api/notifications/by_day` が日次粒度、`/api/notifications/by_day_of_week` が
+// 周期的曜日集計を返すのに対し、本エンドポイントは四半期・半期スパンでの
+// 「週次流量トレンド」を 1 リクエストで返す中間解像度エンドポイント。日次だと
+// 点が多過ぎ、曜日別だと期間全体の推移が見えないユースケース向け。
+// 既存 `/by_day` `/by_hour_of_day` `/by_day_of_week` と同一のフィルタセット
+// (`user_id` / `channel` / `status` / `since` / `until`) を再利用する。
+//
+// バケットキーは `created_at` を UTC 化した ISO 8601 週表記 (`"2026-W27"` 等)。
+// ISO 週規則により週の初日は月曜、年跨ぎは木曜がどちらの年に属するかで決まる。
+// 週番号は 2 桁ゼロ詰めで、"YYYY-Www" の lex 昇順 = カレンダー週昇順を保つ。
+// populated-only: 母集団 0 の週は含めない（`by_day` と同じ規約）。
+// 破損した created_at (パース不能) は `applyListFilters` と同じ防御方針で
+// 集計対象外とする。
+//
+// `/:id` より前に登録して、`:id == "by_week"` の衝突を防ぐ。
+app.get("/api/notifications/by_week", (req: Request, res: Response) => {
+  const parsed = parseListFilters(req);
+  if (!parsed.ok) {
+    log("WARN", `Invalid by_week filter: ${parsed.error}`);
+    res.status(parsed.status).json({ error: parsed.error });
+    return;
+  }
+
+  const result = applyListFilters(notifications, parsed);
+
+  // ISO 週キー ("YYYY-Www") → 件数。破損 created_at はスキップ。
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const n of result) {
+    const ts = new Date(n.created_at);
+    if (Number.isNaN(ts.getTime())) continue;
+    const key = isoWeekKey(ts);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    total += 1;
+  }
+
+  // ISO 週フォーマット (YYYY-Www) は 2 桁ゼロ詰めで lex 順 = カレンダー週順。
+  const byWeek = Array.from(counts.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([week, count]) => ({ week, count }));
+
+  log(
+    "INFO",
+    `by_week requested: total=${total} distinct_weeks=${byWeek.length} user_id=${parsed.userId ?? "-"} channel=${parsed.channel ?? "-"} status=${parsed.status ?? "-"}`,
+  );
+  res.json({
+    total,
+    distinct_weeks: byWeek.length,
+    by_week: byWeek,
+  });
+});
+
 app.get("/api/notifications/:id", (req: Request, res: Response) => {
   const notification = notifications.find((n) => n.id === req.params.id);
   if (!notification) {
