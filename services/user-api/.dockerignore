@@ -1,0 +1,52 @@
+# Python bytecode / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+
+# Test source (not needed in the runtime image)
+test_*.py
+*_test.py
+tests/
+
+# Environment / secrets
+.env
+.env.*
+
+# Git / Docker metadata (not needed inside the image)
+.git/
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+
+# Docs (kept out of the runtime image; still available in the repo)
+README.md
+CHANGELOG.md
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
