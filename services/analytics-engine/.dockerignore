@@ -1,0 +1,36 @@
+# Go test files (not needed for `go build` in the runtime image)
+*_test.go
+
+# Local build output (in case a binary was built on the host)
+analytics-engine
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Vendored dependencies (not used by this service)
+vendor/
+
+# Environment / secrets
+.env
+.env.*
+
+# Git / Docker metadata (not needed inside the image)
+.git/
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+
+# Docs (kept out of the runtime image; still available in the repo)
+README.md
+CHANGELOG.md
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

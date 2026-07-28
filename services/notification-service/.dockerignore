@@ -1,0 +1,50 @@
+# Node dependencies (installed inside the image via `npm ci`)
+node_modules/
+
+# Build outputs (produced inside the image by `npm run build`)
+dist/
+*.tsbuildinfo
+
+# Logs / debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+
+# Test source (already excluded from `tsc` via tsconfig; also drop from build context)
+**/*.test.ts
+**/*.spec.ts
+__tests__/
+
+# Test / coverage artifacts
+coverage/
+.nyc_output/
+jest.config.js
+
+# Lint config (not needed for the runtime image)
+.eslintrc.json
+.eslintrc.js
+.eslintrc.cjs
+
+# Environment / secrets
+.env
+.env.*
+
+# Git / Docker metadata (not needed inside the image)
+.git/
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+
+# Docs (kept out of the runtime image; still available in the repo)
+README.md
+CHANGELOG.md
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
