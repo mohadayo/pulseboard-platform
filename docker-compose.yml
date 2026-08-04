@@ -7,6 +7,9 @@ services:
       - USER_API_PORT=5001
       - JWT_SECRET=${JWT_SECRET:-pulseboard-dev-secret}
       - TOKEN_EXPIRY_HOURS=${TOKEN_EXPIRY_HOURS:-24}
+      - MIN_PASSWORD_LENGTH=${MIN_PASSWORD_LENGTH:-6}
+      - USERS_DEFAULT_LIMIT=${USERS_DEFAULT_LIMIT:-50}
+      - USERS_MAX_LIMIT=${USERS_MAX_LIMIT:-200}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
@@ -22,6 +25,8 @@ services:
       - "${ANALYTICS_PORT:-5002}:5002"
     environment:
       - ANALYTICS_PORT=5002
+      - MAX_EVENTS=${MAX_EVENTS:-10000}
+      - MAX_BODY_BYTES=${MAX_BODY_BYTES:-1048576}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5002/health"]
@@ -37,6 +42,8 @@ services:
       - "${NOTIFICATION_PORT:-5003}:5003"
     environment:
       - NOTIFICATION_PORT=5003
+      - MAX_NOTIFICATIONS=${MAX_NOTIFICATIONS:-10000}
+      - MAX_REQUEST_BODY=${MAX_REQUEST_BODY:-256kb}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5003/health"]
