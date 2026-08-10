@@ -13,8 +13,43 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+
+def _parse_log_level(raw):
+    """`LOG_LEVEL` 環境変数の生値を Python 標準 ``logging`` が受理する名前に正規化する。
+
+    ``logging.basicConfig(level=...)`` は最終的に ``logging._checkLevel`` を通り、
+    文字列は ``logging._nameToLevel`` (``CRITICAL/FATAL/ERROR/WARN/WARNING/INFO/
+    DEBUG/NOTSET``) の**大文字完全一致**しか受け付けない。生値を直接渡すと
+    ``LOG_LEVEL=info`` (小文字) / ``LOG_LEVEL=`` (空) / ``LOG_LEVEL=verbose``
+    (typo) 等で ``ValueError: Unknown level: '...'`` を投げ、モジュール import
+    が失敗して ``python app.py`` / ``gunicorn app:app`` / ``pytest`` すべてが
+    起動時にクラッシュする。
+
+    README の "Environment Variables" セクションおよび sibling サービス
+    (``analytics-engine`` の ``parseLogLevel`` / ``notification-service`` の
+    ``parseLogLevel``) と運用を揃え、以下を保証する:
+
+    - 前後空白を ``strip`` し、``upper`` で大文字化してから判定する
+      (``"  Debug  "`` → ``"DEBUG"``)。
+    - ``logging._nameToLevel`` に存在する名前ならその大文字表記を返す。
+    - ``None`` / 空文字 / 空白のみ / 未知値 (``"verbose"`` 等) はすべて
+      ``"INFO"`` にフォールバックする (fail-safe)。
+
+    戻り値は文字列のまま返す。``basicConfig`` は文字列も数値も受理するが、
+    文字列で返しておくとログや例外メッセージに表示された際の可読性が高い。
+    """
+    if raw is None:
+        return "INFO"
+    normalized = raw.strip().upper()
+    if not normalized:
+        return "INFO"
+    if normalized in logging._nameToLevel:
+        return normalized
+    return "INFO"
+
+
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=_parse_log_level(os.getenv("LOG_LEVEL")),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("user-api")
