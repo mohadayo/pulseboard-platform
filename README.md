@@ -70,10 +70,19 @@ npm run dev
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/users/register` | Register a new user |
-| POST | `/api/users/login` | Login and receive JWT |
+| POST | `/api/users/login` | Login and receive a JWT (`token`) |
 | GET | `/api/users/me` | Get current user profile (requires JWT) |
+| PATCH | `/api/users/me` | プロフィール (`name`) の部分更新（要 JWT。`MAX_NAME_LENGTH` を超える値は 400） |
+| POST | `/api/users/me/password` | パスワード変更（要 JWT + `current_password` 再入力。`new_password` は `MIN_PASSWORD_LENGTH` 以上かつ `current_password` と異なる必要あり） |
 | DELETE | `/api/users/me` | アカウント自己退会（要 JWT + `current_password` 再入力。削除後は同 email で再登録可能、二重 DELETE は 404、`users_db` から該当エントリのみ削除し他ユーザに影響しない） |
 | GET | `/api/users` | List users（`?limit=` / `?offset=` ページネーション、`?q=` 部分一致、`?sort=` `?order=`、`?since=` / `?until=` で `created_at` の ISO 8601 範囲フィルタ） |
+| GET | `/api/users/count` | フィルタ後のユーザ件数と最古／最新の `created_at` を返す軽量集計（`?q=` / `?since=` / `?until=` は `/api/users` と共通） |
+| GET | `/api/users/by_domain` | メールアドレスのドメイン別集計を count 降順 (同 count はドメイン名昇順) で返す。`@` を含まない email は `unknown` にフォールバック |
+| GET | `/api/users/signups_by_day` | 登録日 (UTC `YYYY-MM-DD`) 別の新規登録件数を昇順で返す。パース不能な `created_at` は `unknown` にフォールバック |
+| GET | `/api/users/signups_by_week` | 登録週 (ISO `YYYY-Www`) 別の新規登録件数を昇順で返す |
+| GET | `/api/users/signups_by_month` | 登録月 (UTC `YYYY-MM`) 別の新規登録件数を昇順で返す |
+| GET | `/api/users/signups_by_day_of_week` | 登録曜日 (ISO 8601: `1`=Mon〜`7`=Sun) 別の新規登録件数を返す |
+| GET | `/api/users/signups_by_hour_of_day` | 登録時刻 (UTC `00`〜`23`) 別の新規登録件数を返す |
 
 > Email addresses are normalized (trimmed + lowercased) on register/login, so
 > `Foo@x.com` and `foo@x.com` map to the same account. Registration validates
