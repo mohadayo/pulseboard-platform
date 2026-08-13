@@ -1,4 +1,4 @@
-.PHONY: up down test test-python test-go test-ts lint build clean
+.PHONY: up down test test-python test-go test-ts lint lint-python lint-go lint-ts build health clean
 
 up:
 	docker compose up --build -d
@@ -23,7 +23,7 @@ test-ts:
 lint: lint-python lint-go lint-ts
 
 lint-python:
-	cd services/user-api && flake8 --max-line-length=120 --exclude=__pycache__ app.py
+	cd services/user-api && flake8 --max-line-length=120 --exclude=__pycache__ .
 
 lint-go:
 	cd services/analytics-engine && go vet ./...
