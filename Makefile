@@ -23,7 +23,7 @@ test-ts:
 lint: lint-python lint-go lint-ts
 
 lint-python:
-	cd services/user-api && flake8 --max-line-length=120 --exclude=__pycache__ .
+	cd services/user-api && flake8 .
 
 lint-go:
 	cd services/analytics-engine && go vet ./...
