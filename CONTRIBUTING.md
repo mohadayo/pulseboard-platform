@@ -96,7 +96,7 @@ CI (`.github/workflows/ci.yml`) は `push` / `pull_request` (対 `main`) で
 cd services/user-api
 pip install -r requirements.txt
 pytest -v
-flake8 --max-line-length=120 --exclude=__pycache__ .
+flake8 .   # 設定は services/user-api/.flake8 に集約
 
 # analytics-engine (Go)
 cd services/analytics-engine

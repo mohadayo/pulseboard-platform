@@ -28,7 +28,9 @@ jobs:
           cache: 'pip'
           cache-dependency-path: services/user-api/requirements.txt
       - run: pip install -r requirements.txt
-      - run: flake8 --max-line-length=120 --exclude=__pycache__ .
+      # lint オプションは services/user-api/.flake8 に集約されているので、
+      # CLI では対象パスだけを渡す。
+      - run: flake8 .
       - run: pytest -v
 
   test-go:

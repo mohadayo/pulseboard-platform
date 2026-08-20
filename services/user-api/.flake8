@@ -1,0 +1,10 @@
+[flake8]
+# CI (.github/workflows/ci.yml) と Makefile (`lint-python`) はこの設定を読むため、
+# 個別の CLI 引数を指定していない。ローカルで `cd services/user-api && flake8 .` を
+# 叩いたときも CI と同じルールで動くようにここに一元化する。
+max-line-length = 120
+exclude =
+    __pycache__,
+    .venv,
+    venv,
+    .pytest_cache
