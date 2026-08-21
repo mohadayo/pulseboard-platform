@@ -240,6 +240,15 @@ pulseboard-platform/
         └── Dockerfile
 ```
 
+## Documentation
+
+追加のドキュメントは [`docs/`](docs/) 配下に集約している。
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | サービス構成・データフロー・データ保持方式・環境変数の分類・拡張時の指針 |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | よくある起動・接続エラーの症状別切り分け手順 |
+
 ## License
 
 MIT
