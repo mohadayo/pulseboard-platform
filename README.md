@@ -144,7 +144,13 @@ curl -X POST http://localhost:5002/api/analytics/track \
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/notifications/send` | Send a notification |
-| GET | `/api/notifications` | List notifications (optional `?user_id=`) |
+| GET | `/api/notifications` | List notifications（`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=` / `?limit=` / `?offset=`） |
+| GET | `/api/notifications/summary` | フィルタ後の通知件数を channel 別・status 別に集約した軽量エンドポイント。`by_channel` / `by_status` は `ALLOWED_*` の全キーを 0 で初期化して返すため、クライアントは存在チェックなしで参照できる（`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=`） |
+| DELETE | `/api/notifications` | フィルタ条件に一致する通知を一括削除。誤った全件削除を防ぐため `user_id` / `channel` / `status` / `since` / `until` の少なくとも 1 つが必須（`analytics-engine` の DELETE と同じ規約） |
+| GET | `/api/notifications/by_day` | UTC 日付 (`YYYY-MM-DD`) 別の通知件数を昇順で返す（`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=`）。populated バケットのみ返却 |
+| GET | `/api/notifications/by_hour_of_day` | UTC 時刻 (`00`〜`23`) 別の通知件数を返す（曜日・日付を跨いで統合。`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=`） |
+| GET | `/api/notifications/by_day_of_week` | ISO 曜日 (`1`=Mon〜`7`=Sun) 別の通知件数を返す（`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=`） |
+| GET | `/api/notifications/by_week` | ISO 週 (`YYYY-Www`) 別の通知件数を昇順で返す（`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=`） |
 | GET | `/api/notifications/:id` | Get notification by ID |
 
 **Send Notification:**
