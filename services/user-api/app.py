@@ -93,6 +93,32 @@ def _access_log_end(response):
     return response
 
 
+@app.after_request
+def _security_headers(response):
+    """すべての応答に最小限のセキュリティレスポンスヘッダを付与する。
+
+    JSON API 単体で helmet-py のような追加依存を入れずに、Flask 標準の
+    ``after_request`` フックで完結させる。付与するヘッダは MIME sniffing /
+    clickjacking / Referrer 漏洩の一般対策として業界標準に近いもののみ:
+
+    - ``X-Content-Type-Options: nosniff`` … JSON エンドポイントを別 MIME として
+      解釈させる MIME sniffing 攻撃を抑止。ブラウザ拡張や proxy 経由で叩かれた
+      ときも一貫して JSON として扱われる。
+    - ``X-Frame-Options: DENY`` … 本 API を ``<iframe>`` に埋め込ませない。
+      JSON API はフレーム表示を意図しないため常時拒否 (clickjacking 対策)。
+    - ``Referrer-Policy: no-referrer`` … 内部 URL やクエリ文字列がリンク先の
+      Referrer ヘッダとして外部に漏れないよう抑止。
+
+    ``_access_log_end`` の後段に置くことで、そちらの ``X-Response-Time-Ms`` と
+    干渉せず両方が同じレスポンスに乗る。既存のヘッダを再宣言しない
+    (``setdefault``) ことで、テストや将来の per-route オーバーライドを壊さない。
+    """
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
+
 SECRET_KEY = os.getenv("JWT_SECRET", "pulseboard-dev-secret")
 TOKEN_EXPIRY_HOURS = int(os.getenv("TOKEN_EXPIRY_HOURS", "24"))
 
