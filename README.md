@@ -253,7 +253,9 @@ pulseboard-platform/
 | ドキュメント | 内容 |
 |-------------|------|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | サービス構成・データフロー・データ保持方式・環境変数の分類・拡張時の指針 |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | 日常運用・デプロイ・ロールバック・インシデント一次対応・オンコール引き継ぎのランブック |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | よくある起動・接続エラーの症状別切り分け手順 |
+| [`docs/FAQ.md`](docs/FAQ.md) | 設定・運用・仕様に関するよくある質問と回答 |
 
 ## License
 
