@@ -24,7 +24,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # バージョンは services/user-api/.python-version に一元化。
+          # ローカル (asdf/mise/pyenv) と CI で同じ Python を使うため、
+          # ここでは python-version を直書きせずファイル参照する。
+          python-version-file: services/user-api/.python-version
           cache: 'pip'
           cache-dependency-path: services/user-api/requirements.txt
       - run: pip install -r requirements.txt
@@ -43,7 +46,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          # バージョンは services/analytics-engine/.go-version に一元化。
+          go-version-file: services/analytics-engine/.go-version
           cache: true
           # analytics-engine は標準ライブラリのみで go.sum を持たないため、
           # cache-dependency-path は go.mod を指す（setup-go v5 は go.mod でもハッシュを取れる）
@@ -61,7 +65,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # バージョンは services/notification-service/.nvmrc に一元化。
+          node-version-file: services/notification-service/.nvmrc
           cache: 'npm'
           cache-dependency-path: services/notification-service/package-lock.json
       - run: npm ci
