@@ -1,0 +1,32 @@
+# Citation File Format v1.2.0
+# https://citation-file-format.github.io/
+#
+# このファイルは PulseBoard Platform を学術論文・技術記事・ドキュメントで
+# 参照する際の引用メタデータを機械可読に提供する。GitHub のリポジトリ画面に
+# 表示される "Cite this repository" ボタンから BibTeX / APA 形式で取得できる。
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "PulseBoard Platform"
+abstract: >-
+  Real-time microservices dashboard platform composed of a Python/Flask User
+  API, a Go analytics engine, and a TypeScript/Express notification service.
+  Provides user management, event tracking with time-series aggregation, and
+  multi-channel notification delivery behind a unified API surface.
+type: software
+authors:
+  - alias: mohadayo
+    name: "mohadayo"
+repository-code: "https://github.com/mohadayo/pulseboard-platform"
+url: "https://github.com/mohadayo/pulseboard-platform"
+license: MIT
+keywords:
+  - microservices
+  - dashboard
+  - analytics
+  - notifications
+  - real-time
+  - flask
+  - go
+  - typescript
+  - jwt
+  - event-tracking
