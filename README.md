@@ -81,6 +81,7 @@ npm run dev
 | GET | `/api/users/signups_by_day` | 登録日 (UTC `YYYY-MM-DD`) 別の新規登録件数を昇順で返す。パース不能な `created_at` は `unknown` にフォールバック |
 | GET | `/api/users/signups_by_week` | 登録週 (ISO `YYYY-Www`) 別の新規登録件数を昇順で返す |
 | GET | `/api/users/signups_by_month` | 登録月 (UTC `YYYY-MM`) 別の新規登録件数を昇順で返す |
+| GET | `/api/users/signups_by_year` | 登録年 (UTC `YYYY`) 別の新規登録件数を昇順で返す。年次 KPI ダッシュボード用の最上位粒度 |
 | GET | `/api/users/signups_by_day_of_week` | 登録曜日 (ISO 8601: `1`=Mon〜`7`=Sun) 別の新規登録件数を返す |
 | GET | `/api/users/signups_by_hour_of_day` | 登録時刻 (UTC `00`〜`23`) 別の新規登録件数を返す |
 
