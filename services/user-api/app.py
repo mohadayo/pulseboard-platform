@@ -982,6 +982,108 @@ def users_signups_by_month():
     return jsonify(resp)
 
 
+@app.route("/api/users/signups_by_year", methods=["GET"])
+def users_signups_by_year():
+    """登録年 (`YYYY`, UTC) 別の新規ユーザ登録件数を時系列で返す。
+
+    `signups_by_day` / `signups_by_week` / `signups_by_month` に続く粒度階段の
+    最上位。複数年にまたがるサービス成長トレンドを 1 リクエストで取得できるようにし、
+    「月次データ 12 バケットをクライアント側で年へ再集計する」という無駄を無くす。
+    年次 KPI ダッシュボードや年別成長率グラフを想定した最小 API。
+
+    バケットキーは UTC 正規化した `created_at` から取り出した 4 桁ゼロ詰めの年
+    （例: `"2024"`）。lex 昇順 = カレンダー年昇順を保つため追加のソートキー変換は不要。
+
+    フィルタは `signups_by_day` / `signups_by_month` と同じ `q` / `since` / `until`。
+    Sort / pagination パラメータは無視する（既存の `by_day` / `by_month` と整合）。
+
+    `by_year` は登録年の昇順で固定する（時系列グラフへそのまま流し込めるように）。
+    `created_at` が壊れている／パースできないユーザは `unknown` 年として
+    フォールバック集計する（`signups_by_day` の `unknown` 日と同じ思想）。
+    `"unknown"` は 4 桁数字年の lex 範囲 ("0-9") より後に来るため、自然に末尾に並ぶ。
+    """
+    q, q_err = _normalize_q(request.args.get("q"))
+    if q_err is not None:
+        logger.warning("Invalid q on signups_by_year: %s", q_err)
+        return jsonify({"error": q_err}), 400
+
+    since_dt, since_err = _parse_iso_datetime(request.args.get("since"), "since")
+    if since_err is not None:
+        logger.warning("Invalid since on signups_by_year: %s", since_err)
+        return jsonify({"error": since_err}), 400
+    until_dt, until_err = _parse_iso_datetime(request.args.get("until"), "until")
+    if until_err is not None:
+        logger.warning("Invalid until on signups_by_year: %s", until_err)
+        return jsonify({"error": until_err}), 400
+    if since_dt is not None and until_dt is not None and since_dt > until_dt:
+        logger.warning(
+            "Invalid range on signups_by_year: since=%s > until=%s",
+            request.args.get("since"), request.args.get("until"),
+        )
+        return jsonify({"error": "since must be less than or equal to until"}), 400
+
+    counts: dict[str, int] = {}
+    total = 0
+    for u in users_db.values():
+        if q is not None:
+            email_l = u.get("email", "").lower()
+            name_l = (u.get("name") or "").lower()
+            if q not in email_l and q not in name_l:
+                continue
+        created_raw = u.get("created_at") if isinstance(u.get("created_at"), str) else None
+        if since_dt is not None or until_dt is not None:
+            if created_raw is None:
+                continue
+            try:
+                created_dt_filter = datetime.fromisoformat(created_raw)
+            except ValueError:
+                continue
+            if created_dt_filter.tzinfo is None:
+                created_dt_filter = created_dt_filter.replace(tzinfo=timezone.utc)
+            if since_dt is not None and created_dt_filter < since_dt:
+                continue
+            if until_dt is not None and created_dt_filter > until_dt:
+                continue
+
+        if created_raw is None:
+            year = "unknown"
+        else:
+            try:
+                created_dt = datetime.fromisoformat(created_raw)
+            except ValueError:
+                year = "unknown"
+            else:
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                # UTC で正規化してから「YYYY」を取り出す。tz 越境で年が変わる場合も
+                # UTC ベースで一貫した結果が得られる（signups_by_month と同じ思想）。
+                year = f"{created_dt.astimezone(timezone.utc).year:04d}"
+        counts[year] = counts.get(year, 0) + 1
+        total += 1
+
+    # 年昇順で固定。`unknown` は 4 桁数字年 ("YYYY") の lex 範囲 ("0-9") の後に
+    # 来るため、`signups_by_day` / `signups_by_month` と同じく自然に末尾に並ぶ。
+    sorted_items = sorted(counts.items(), key=lambda kv: kv[0])
+    by_year = [{"year": y, "count": c} for y, c in sorted_items]
+
+    since_raw = request.args.get("since")
+    until_raw = request.args.get("until")
+    logger.info(
+        "Users signups by year: total=%d distinct=%d (q=%s since=%s until=%s)",
+        total, len(by_year), q, since_raw, until_raw,
+    )
+    resp = {
+        "total": total,
+        "distinct_years": len(by_year),
+        "by_year": by_year,
+    }
+    if since_raw is not None and since_raw.strip():
+        resp["since"] = since_raw
+    if until_raw is not None and until_raw.strip():
+        resp["until"] = until_raw
+    return jsonify(resp)
+
+
 @app.route("/api/users/signups_by_week", methods=["GET"])
 def users_signups_by_week():
     """登録週 (ISO 週フォーマット YYYY-Www, UTC) 別の新規ユーザ登録件数を時系列で返す。

@@ -1461,6 +1461,162 @@ def test_signups_by_month_unknown_sorts_after_dated_months(client):
     assert months == ["2024-06", "unknown"]
 
 
+# ---- /api/users/signups_by_year ----
+
+
+def test_signups_by_year_empty(client):
+    resp = client.get("/api/users/signups_by_year")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body == {"total": 0, "distinct_years": 0, "by_year": []}
+
+
+def test_signups_by_year_basic_chronological_order(client):
+    _register_user_with_created_at("a@example.com", "2022-01-15T10:00:00+00:00")
+    _register_user_with_created_at("b@example.com", "2022-12-31T23:59:00+00:00")
+    _register_user_with_created_at("c@example.com", "2023-01-01T00:01:00+00:00")
+    _register_user_with_created_at("d@example.com", "2024-06-15T05:00:00+00:00")
+    _register_user_with_created_at("e@example.com", "2024-11-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_year")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total"] == 5
+    assert body["distinct_years"] == 3
+    assert body["by_year"] == [
+        {"year": "2022", "count": 2},
+        {"year": "2023", "count": 1},
+        {"year": "2024", "count": 2},
+    ]
+
+
+def test_signups_by_year_normalizes_to_utc_year(client):
+    # tz オフセット付き created_at は UTC に変換してから年ビニングされる。
+    # 2024-12-31T23:30:00+09:00 -> UTC は 2024-12-31T14:30:00Z -> year = "2024"
+    _register_user_with_created_at("jp@example.com", "2024-12-31T23:30:00+09:00")
+    # 2025-01-01T02:30:00-09:00 -> UTC は 2025-01-01T11:30:00Z -> year = "2025"
+    # → 年境界をまたぐ tz オフセットでも UTC で正規化される。
+    _register_user_with_created_at("us@example.com", "2025-01-01T02:30:00-09:00")
+    resp = client.get("/api/users/signups_by_year")
+    body = resp.get_json()
+    assert body["by_year"] == [
+        {"year": "2024", "count": 1},
+        {"year": "2025", "count": 1},
+    ]
+
+
+def test_signups_by_year_naive_treated_as_utc(client):
+    # tz を持たない naive `created_at` は UTC として扱われる（`signups_by_day` 等と同じ挙動）。
+    _register_user_with_created_at("naive@example.com", "2024-06-15T12:00:00")
+    resp = client.get("/api/users/signups_by_year")
+    body = resp.get_json()
+    assert body["by_year"] == [{"year": "2024", "count": 1}]
+
+
+def test_signups_by_year_fallback_unknown_for_broken_created_at(client):
+    _register_user_with_created_at("ok@example.com", "2024-01-15T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_year")
+    body = resp.get_json()
+    counts = {item["year"]: item["count"] for item in body["by_year"]}
+    assert counts == {"2024": 1, "unknown": 1}
+
+
+def test_signups_by_year_filters_by_q(client):
+    _register_user_with_created_at("alice@example.com", "2023-01-15T00:00:00+00:00")
+    _register_user_with_created_at("bob@example.com", "2024-02-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_year?q=alice")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_year"] == [{"year": "2023", "count": 1}]
+
+
+def test_signups_by_year_filters_by_since(client):
+    _register_user_with_created_at("old@example.com", "2022-01-15T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_year?since=2023-01-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_year"] == [{"year": "2024", "count": 1}]
+
+
+def test_signups_by_year_filters_by_until(client):
+    _register_user_with_created_at("old@example.com", "2022-01-15T00:00:00+00:00")
+    _register_user_with_created_at("new@example.com", "2024-06-15T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_year?until=2023-01-01T00:00:00Z")
+    body = resp.get_json()
+    assert body["total"] == 1
+    assert body["by_year"] == [{"year": "2022", "count": 1}]
+
+
+def test_signups_by_year_rejects_invalid_since(client):
+    resp = client.get("/api/users/signups_by_year?since=not-a-date")
+    assert resp.status_code == 400
+
+
+def test_signups_by_year_rejects_since_after_until(client):
+    resp = client.get(
+        "/api/users/signups_by_year?since=2024-12-01T00:00:00Z&until=2024-01-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+
+
+def test_signups_by_year_rejects_overlong_q(client):
+    too_long = "a" * 1000
+    resp = client.get(f"/api/users/signups_by_year?q={too_long}")
+    assert resp.status_code == 400
+
+
+def test_signups_by_year_ignores_pagination_params(client):
+    _register_user_with_created_at("u1@example.com", "2023-01-15T00:00:00+00:00")
+    _register_user_with_created_at("u2@example.com", "2024-02-15T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_year?limit=1&offset=99999&sort=created_at&order=desc"
+    )
+    body = resp.get_json()
+    assert body["total"] == 2
+    assert len(body["by_year"]) == 2
+
+
+def test_signups_by_year_no_filter_returns_no_echo_fields(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-01T00:00:00+00:00")
+    resp = client.get("/api/users/signups_by_year")
+    body = resp.get_json()
+    assert "since" not in body
+    assert "until" not in body
+
+
+def test_signups_by_year_echoes_since_until_when_provided(client):
+    _register_user_with_created_at("u1@example.com", "2024-01-15T00:00:00+00:00")
+    resp = client.get(
+        "/api/users/signups_by_year?since=2023-12-01T00:00:00Z&until=2024-12-01T00:00:00Z"
+    )
+    body = resp.get_json()
+    assert body["since"] == "2023-12-01T00:00:00Z"
+    assert body["until"] == "2024-12-01T00:00:00Z"
+
+
+def test_signups_by_year_unknown_sorts_after_dated_years(client):
+    # `unknown` ラベルは 4 桁数字年の後に並ぶ（lex 比較で "0..9" の後）。
+    _register_user_with_created_at("ok@example.com", "2024-06-15T00:00:00+00:00")
+    users_db["broken@example.com"] = {
+        "id": "id-broken",
+        "email": "broken@example.com",
+        "password": "x",
+        "name": "Broken",
+        "created_at": "not-an-iso-date",
+    }
+    resp = client.get("/api/users/signups_by_year")
+    body = resp.get_json()
+    years = [item["year"] for item in body["by_year"]]
+    assert years == ["2024", "unknown"]
+
+
 # ---- /api/users/signups_by_week ----
 
 
