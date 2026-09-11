@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import hashlib
+import hmac
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -248,7 +249,10 @@ def login():
     # 登録時と同じ正規化を施し、大小文字違いでもログインできるようにする。
     email = normalize_email(email_raw)
     user = users_db.get(email)
-    if not user or user["password"] != hash_password(password):
+    # 保存済みハッシュとの比較には `hmac.compare_digest` を用い、
+    # プレフィックス一致による短絡評価からタイミング側チャネル攻撃を防ぐ。
+    # SHA-256 は 64 桁 hex で固定長のため `compare_digest` の長さ要件を満たす。
+    if not user or not hmac.compare_digest(user["password"], hash_password(password)):
         logger.warning("Failed login attempt for: %s", email)
         return jsonify({"error": "Invalid credentials"}), 401
 
@@ -376,7 +380,8 @@ def change_password():
         logger.warning("Password change for missing user: %s", email)
         return jsonify({"error": "User not found"}), 404
 
-    if user["password"] != hash_password(current_raw):
+    # login と同じく `hmac.compare_digest` で定数時間比較する。
+    if not hmac.compare_digest(user["password"], hash_password(current_raw)):
         logger.warning("Password change with wrong current password: %s", email)
         return jsonify({"error": "Current password is incorrect"}), 401
 

@@ -2107,3 +2107,91 @@ def test_signups_by_hour_of_day_full_24_hour_distribution(client):
         {"hour": "12", "count": 1},
         {"hour": "18", "count": 1},
     ]
+
+
+# ---------- Timing-safe password comparison (GH-154) ----------
+
+def test_login_uses_constant_time_compare(client, monkeypatch):
+    """login はハッシュ比較に `hmac.compare_digest` を用いること。
+
+    プレフィックス一致による短絡評価のタイミング側チャネルから保護されている
+    ことを担保する。monkeypatch でスパイを差し込み、失敗ケースでもスパイが
+    呼ばれる（＝定数時間比較経路が使われている）ことを確認する。
+    """
+    import app as app_module
+    calls = {"count": 0, "args": []}
+
+    real_compare = app_module.hmac.compare_digest
+
+    def _spy(a, b):
+        calls["count"] += 1
+        calls["args"].append((a, b))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(app_module.hmac, "compare_digest", _spy)
+
+    client.post(
+        "/api/users/register",
+        json={"email": "u@x.com", "password": "correctpass"},
+    )
+    # 正常ログイン: スパイが呼ばれ True 経路
+    resp = client.post(
+        "/api/users/login",
+        json={"email": "u@x.com", "password": "correctpass"},
+    )
+    assert resp.status_code == 200
+    assert calls["count"] >= 1
+
+    calls["count"] = 0
+    # 誤ったパスワード: スパイが呼ばれて False 経路 (401 が返る)
+    resp = client.post(
+        "/api/users/login",
+        json={"email": "u@x.com", "password": "wrongpass"},
+    )
+    assert resp.status_code == 401
+    assert calls["count"] >= 1
+
+
+def test_change_password_uses_constant_time_compare(client, monkeypatch):
+    """change_password も同様に `hmac.compare_digest` を経由すること。"""
+    import app as app_module
+    calls = {"count": 0}
+    real_compare = app_module.hmac.compare_digest
+
+    def _spy(a, b):
+        calls["count"] += 1
+        return real_compare(a, b)
+
+    monkeypatch.setattr(app_module.hmac, "compare_digest", _spy)
+
+    client.post(
+        "/api/users/register",
+        json={"email": "u2@x.com", "password": "originalpass"},
+    )
+    login_resp = client.post(
+        "/api/users/login",
+        json={"email": "u2@x.com", "password": "originalpass"},
+    )
+    token = login_resp.get_json()["token"]
+
+    # login と change_password の両方が compare_digest を経由するため、
+    # ここまでで少なくとも 1 回はスパイが呼ばれている。以降の change_password
+    # 分をカウントするためリセットする。
+    calls["count"] = 0
+    resp = client.post(
+        "/api/users/me/password",
+        json={"current_password": "originalpass", "new_password": "newerpass1"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    assert calls["count"] >= 1
+
+    # 誤った現行パスワードでも compare_digest を経由する（401 が返る）。
+    calls["count"] = 0
+    resp = client.post(
+        "/api/users/me/password",
+        json={"current_password": "wrongoriginal", "new_password": "yetanotherpass"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 401
+    assert calls["count"] >= 1
