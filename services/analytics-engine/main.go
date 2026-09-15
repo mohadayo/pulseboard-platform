@@ -74,6 +74,13 @@ type Event struct {
 	EventType string `json:"event_type"`
 	Payload   string `json:"payload"`
 	Timestamp string `json:"timestamp"`
+	// parsedTS は Timestamp を time.Time に事前パースした結果のキャッシュ。
+	// 非公開フィールドのため encoding/json では入出力に一切現れず、JSON API の
+	// スキーマも維持したまま集計ハンドラでの再パースを省ける。trackHandler
+	// で `time.Now()` の戻り値をそのまま代入するので POST 経路ではパースゼロ、
+	// 直接 events スライスに投入する経路（テストの seed 等）は zero 値のまま
+	// でも eventTime() が Timestamp から遅延パースするため後方互換。
+	parsedTS time.Time
 }
 
 type StatsResponse struct {
@@ -159,7 +166,11 @@ func trackHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	counter++
 	evt.ID = fmt.Sprintf("evt_%d", counter)
-	evt.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	// 生成した now を Timestamp（文字列）と parsedTS（time.Time キャッシュ）の
+	// 両方に反映しておくことで、後段の集計/フィルタでの string→time パースを不要にする。
+	now := time.Now().UTC()
+	evt.Timestamp = now.Format(time.RFC3339)
+	evt.parsedTS = now
 	events = append(events, evt)
 	if maxEvents > 0 && len(events) > maxEvents {
 		removed := len(events) - maxEvents
@@ -188,6 +199,23 @@ func parseAnalyticsQueryTime(raw, field string) (*time.Time, error) {
 	return &t, nil
 }
 
+// eventTime は Event に紐づく時刻を返す。POST 経由で作成された Event は
+// trackHandler の中で `parsedTS` に time.Now() を格納済みなので、この関数は
+// string の再パースなしに即座に time.Time を返し、フィルタ／集計の tight loop
+// でのアロケーションと CPU コストを削減する。parsedTS が zero 値の場合
+// （テストが `seedEvents` で直接 Event リテラルを詰める経路など）は、
+// 従来通り Timestamp を RFC3339 として遅延パースし、失敗時は ok=false を返す。
+func eventTime(e Event) (time.Time, bool) {
+	if !e.parsedTS.IsZero() {
+		return e.parsedTS, true
+	}
+	t, err := time.Parse(time.RFC3339, e.Timestamp)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // matchEventFilters は単一イベントが (event_type, user_id, since, until) 全フィルタに
 // 合致するかを返す。listEventsHandler と statsHandler で同じ判定を共有する。
 // 破損した Event.Timestamp は時刻フィルタの取りこぼし防止のため除外する。
@@ -201,8 +229,8 @@ func matchEventFilters(e Event, eventType, userID string, since, until *time.Tim
 	if since == nil && until == nil {
 		return true
 	}
-	ts, terr := time.Parse(time.RFC3339, e.Timestamp)
-	if terr != nil {
+	ts, ok := eventTime(e)
+	if !ok {
 		return false
 	}
 	if since != nil && ts.Before(*since) {
@@ -360,9 +388,9 @@ func deleteEventsHandler(w http.ResponseWriter, r *http.Request) {
 		matchType := eventType == "" || e.EventType == eventType
 		matchBefore := true
 		if before != nil {
-			ts, terr := time.Parse(time.RFC3339, e.Timestamp)
+			ts, ok := eventTime(e)
 			// 破損したタイムスタンプはフィルタの取りこぼし／誤削除を避けるため保持
-			matchBefore = terr == nil && ts.Before(*before)
+			matchBefore = ok && ts.Before(*before)
 		}
 		if matchUser && matchType && matchBefore {
 			deleted++
@@ -936,8 +964,10 @@ func eventsByDayHandler(w http.ResponseWriter, r *http.Request) {
 		// `Timestamp` は POST 時に RFC3339 に正規化されている前提だが、
 		// 何らかの理由でパースに失敗した場合は当該イベントを集計対象から除外する
 		// （壊れた行で集計全体が崩れないように deny-by-default）。
-		t, perr := parseAnalyticsTime(e.Timestamp)
-		if perr != nil {
+		// eventTime() は trackHandler が事前計算した parsedTS を優先し、
+		// 未設定の Event に対してのみ Timestamp をパースする。
+		t, ok := eventTime(e)
+		if !ok {
 			continue
 		}
 		day := t.UTC().Format("2006-01-02")
@@ -1289,9 +1319,10 @@ func eventsByHourOfDayHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// `Timestamp` は POST 時に RFC3339 に正規化されている前提だが、何らかの理由で
 		// パースに失敗した場合は当該イベントを集計から除外する（events_by_day と同じ
-		// deny-by-default 防御）。
-		t, perr := parseAnalyticsTime(e.Timestamp)
-		if perr != nil {
+		// deny-by-default 防御）。eventTime() は事前パース済みキャッシュを優先し、
+		// tight loop でのタイムスタンプ再パースを回避する。
+		t, ok := eventTime(e)
+		if !ok {
 			continue
 		}
 		hour := t.UTC().Format("15")
@@ -1500,9 +1531,10 @@ func eventsByDayOfWeekHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// `Timestamp` は POST 時に RFC3339 に正規化されている前提だが、何らかの理由で
 		// パースに失敗した場合は当該イベントを集計から除外する（events_by_hour_of_day と
-		// 同じ deny-by-default 防御）。
-		t, perr := parseAnalyticsTime(e.Timestamp)
-		if perr != nil {
+		// 同じ deny-by-default 防御）。eventTime() は事前パース済みキャッシュを優先し、
+		// tight loop でのタイムスタンプ再パースを回避する。
+		t, ok := eventTime(e)
+		if !ok {
 			continue
 		}
 		dow := isoWeekdayString(t.UTC())
