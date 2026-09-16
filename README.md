@@ -154,6 +154,9 @@ curl -X POST http://localhost:5002/api/analytics/track \
 | GET | `/api/notifications/by_week` | ISO 週 (`YYYY-Www`) 別の通知件数を昇順で返す（`?user_id=` / `?channel=` / `?status=` / `?since=` / `?until=`） |
 | GET | `/api/notifications/:id` | Get notification by ID |
 
+> `user_id` / `title` / `message` は文字列型かつ trim 後 1 文字以上を要求する。
+> 数値・配列・空文字・空白のみの値は 400 で拒否される。
+
 **Send Notification:**
 ```bash
 curl -X POST http://localhost:5003/api/notifications/send \
