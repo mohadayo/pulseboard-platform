@@ -50,6 +50,69 @@ describe("POST /api/notifications/send", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it("rejects a whitespace-only title", async () => {
+    const res = await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "email",
+      title: "   ",
+      message: "Test msg",
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("non-blank strings");
+  });
+
+  it("rejects a whitespace-only message", async () => {
+    const res = await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "email",
+      title: "Test",
+      message: "  \n  ",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a whitespace-only user_id", async () => {
+    const res = await request(app).post("/api/notifications/send").send({
+      user_id: "  ",
+      channel: "email",
+      title: "Test",
+      message: "Test msg",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a non-string title (number)", async () => {
+    const res = await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "email",
+      title: 123,
+      message: "Test msg",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a non-string message (array)", async () => {
+    const res = await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "email",
+      title: "Test",
+      message: ["a", "b"],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("trims-but-keeps a title with surrounding whitespace as-is", async () => {
+    // バリデーションは trim() 後の長さのみを見るため、値自体は変更せず保存する。
+    const res = await request(app).post("/api/notifications/send").send({
+      user_id: "u1",
+      channel: "email",
+      title: "  Welcome  ",
+      message: "Hello",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.title).toBe("  Welcome  ");
+  });
 });
 
 describe("GET /api/notifications", () => {
