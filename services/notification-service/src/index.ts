@@ -102,12 +102,27 @@ app.get("/health", (_req: Request, res: Response) => {
   });
 });
 
+// isNonBlankString は値が文字列型であり、かつ trim 後に 1 文字以上あることを検証する。
+// `!value` だけの真偽値チェックだと、数値・配列・オブジェクトなどの非文字列や
+// 空白のみの文字列 (" ") が素通りしてしまうため、`user_id` / `title` / `message`
+// のような「意味のある文字列」を要求するフィールドではこちらを使う。
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 app.post("/api/notifications/send", (req: Request, res: Response) => {
   const { user_id, channel, title, message } = req.body;
 
-  if (!user_id || !channel || !title || !message) {
-    log("WARN", "Send attempt with missing fields");
-    res.status(400).json({ error: "user_id, channel, title, and message are required" });
+  if (
+    !isNonBlankString(user_id) ||
+    !isNonBlankString(channel) ||
+    !isNonBlankString(title) ||
+    !isNonBlankString(message)
+  ) {
+    log("WARN", "Send attempt with missing or invalid fields");
+    res.status(400).json({
+      error: "user_id, channel, title, and message are required and must be non-blank strings",
+    });
     return;
   }
 
@@ -121,7 +136,9 @@ app.post("/api/notifications/send", (req: Request, res: Response) => {
   const notification: Notification = {
     id: uuidv4(),
     user_id,
-    channel,
+    // 直前の validChannels.includes チェックで妥当性は確認済みなので、
+    // string からリテラルユニオン型への絞り込みとして安全にキャストする。
+    channel: channel as Notification["channel"],
     title,
     message,
     status: "sent",
