@@ -1,0 +1,33 @@
+# yamllint の共有設定
+#
+# 目的:
+#   本リポジトリの YAML (`docker-compose.yml`, `.github/workflows/*.yml`,
+#   `.github/ISSUE_TEMPLATE/*.yml`) に対して、一般的な YAML の書式ミス
+#   (インデント不揃い、末尾スペース、重複キー、コロン後スペース欠落等) を
+#   PR 時点で検出する。
+#
+# 既定 (`default`) から以下を調整:
+#   - document-start: GitHub Actions ワークフロー / docker-compose では `---` を
+#     省略する慣習が一般的なため無効化。
+#   - line-length: プロジェクトのコメントは日本語 (1 セグメント幅 3 の CJK) を
+#     多用するため、既定の 80 桁だと実プロジェクトでの誤検知が多い。
+#     警告レベルで 200 桁までを許容する。
+#   - truthy.check-keys: false: GitHub Actions の `on:` はキーワードキーで
+#     あり、`"on":` とクオートすると読みにくくなる。値側の truthy チェック
+#     (`yes/no`, `true/false` の取り違え) は既定どおり維持する。
+#   - comments: `#` の直後にスペースが 1 つあれば OK とする。既定の 2 個
+#     ハードコードは実プロジェクトでの誤検知源になりやすい。
+
+extends: default
+
+rules:
+  document-start: disable
+  line-length:
+    max: 200
+    level: warning
+    allow-non-breakable-inline-mappings: true
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
