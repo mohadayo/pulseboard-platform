@@ -71,6 +71,11 @@ jobs:
           cache-dependency-path: services/notification-service/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      # ESLint 実行。test-python の flake8、test-go の go vet と対称に、
+      # TypeScript サービスも lint 違反でマージをブロックする。設定は
+      # services/notification-service/.eslintrc.json、対象は package.json の
+      # `lint` スクリプト (`eslint src/`) と Makefile の `lint-ts` と一致させる。
+      - run: npx eslint src/
       - run: npm test
 
   docker-build:
