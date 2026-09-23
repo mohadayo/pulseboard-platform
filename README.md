@@ -257,6 +257,7 @@ pulseboard-platform/
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | サービス構成・データフロー・データ保持方式・環境変数の分類・拡張時の指針 |
 | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | サービス横断で使われる用語（event / channel / status / FIFO eviction / in-memory store / ISO 週 / JWT など）の単一リファレンス |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | メトリクス・構造化ログ・分散トレース・SLO/SLI・アラート設計の運用方針 |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | 現在地と Now / Next / Later のマイルストーン、Non-goals、貢献指針を単一ファイルで示すロードマップ |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | 日常運用・デプロイ・ロールバック・インシデント一次対応・オンコール引き継ぎのランブック |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | よくある起動・接続エラーの症状別切り分け手順 |
 | [`docs/FAQ.md`](docs/FAQ.md) | 設定・運用・仕様に関するよくある質問と回答 |
