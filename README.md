@@ -1,5 +1,13 @@
 # PulseBoard Platform
 
+[![CI](https://github.com/mohadayo/pulseboard-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/ci.yml)
+[![yamllint](https://github.com/mohadayo/pulseboard-platform/actions/workflows/yamllint.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/yamllint.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12+-3776ab.svg?logo=python&logoColor=white)](services/user-api)
+[![Go](https://img.shields.io/badge/go-1.22+-00add8.svg?logo=go&logoColor=white)](services/analytics-engine)
+[![Node.js](https://img.shields.io/badge/node-20+-339933.svg?logo=node.js&logoColor=white)](services/notification-service)
+[![TypeScript](https://img.shields.io/badge/typescript-5+-3178c6.svg?logo=typescript&logoColor=white)](services/notification-service)
+
 Real-time microservices dashboard platform with user management, analytics tracking, and multi-channel notification delivery.
 
 ## Architecture
