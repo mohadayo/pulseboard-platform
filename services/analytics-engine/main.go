@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -1676,8 +1679,46 @@ func main() {
 	}
 
 	srv := newServer(":"+port, newRouter())
-	log.Printf("Starting analytics-engine on port %s (max body %d bytes, max events %d)", port, maxBodyBytes, maxEvents)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+
+	// SIGTERM / SIGINT を受けたら新規接続を打ち切り、進行中のリクエストを
+	// 完了させてから終了する。Docker / Kubernetes でのローリングアップデート時に
+	// 途中切断や 5xx を生まないため。
+	//
+	// buffer 2: 1 回目でグレースフルシャットダウンを開始し、2 回目以降は
+	// force-exit goroutine に拾わせる（長時間稼働中の集計リクエストが
+	// shutdown タイムアウトを使い切っている間に K8s eviction / Ctrl-C 連打が
+	// 来ても確実に落とす）。
+	quit := make(chan os.Signal, 2)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("Starting analytics-engine on port %s (max body %d bytes, max events %d)", port, maxBodyBytes, maxEvents)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	sig := <-quit
+	log.Printf("Received %v, shutting down analytics-engine gracefully...", sig)
+
+	// 2 回目のシグナルは即時終了パスへ。128 + signal number の慣例
+	// （SIGINT=130, SIGTERM=143）に合わせ exit code を決定する。
+	go func() {
+		sig2 := <-quit
+		log.Printf("Received second %v during shutdown, forcing immediate exit", sig2)
+		exitCode := 1
+		if s, ok := sig2.(syscall.Signal); ok {
+			exitCode = 128 + int(s)
+		}
+		os.Exit(exitCode)
+	}()
+
+	shutdownTimeout := time.Duration(getEnvInt("ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS", 30)) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("Graceful shutdown failed: %v", err)
 	}
+	log.Println("analytics-engine stopped")
 }
