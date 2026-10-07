@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# 最小権限の原則 (least privilege) に従い、ワークフロー既定の GITHUB_TOKEN 権限を
+# チェックアウト等に必要な `contents: read` のみに絞る。本ワークフローは
+# issue / PR / release / packages 等への書き込みを行わないため、既定で write が
+# 付与されるトークンスコープを明示的に read に限定し、サプライチェーン攻撃や
+# ワークフロー誤改変時の被害範囲を縮小する。codeql.yml / yamllint.yml と対称。
+permissions:
+  contents: read
+
 # 同一ワークフロー・同一 ref (PR ブランチや main) で新しいジョブが起動したら、
 # 進行中の古いジョブをキャンセルする。PR に短時間で連続 push した場合の
 # 実行枠・実行時間の無駄を削減する。
