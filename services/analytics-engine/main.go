@@ -140,7 +140,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func trackHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
@@ -152,17 +152,17 @@ func trackHandler(w http.ResponseWriter, r *http.Request) {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			log.Printf("Request body too large (limit %d bytes)", maxBodyBytes)
-			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
 		log.Printf("Invalid event payload: %v", err)
-		http.Error(w, `{"error":"invalid JSON payload"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
 
 	if evt.UserID == "" || evt.EventType == "" {
 		log.Println("Missing required fields in event")
-		http.Error(w, `{"error":"user_id and event_type are required"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "user_id and event_type are required")
 		return
 	}
 
@@ -247,7 +247,7 @@ func matchEventFilters(e Event, eventType, userID string, since, until *time.Tim
 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
@@ -347,7 +347,7 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		deleteEventsHandler(w, r)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
