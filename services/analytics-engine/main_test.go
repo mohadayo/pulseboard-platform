@@ -2837,3 +2837,29 @@ func TestEventsByHourOfDayHandler_RegisteredOnRouter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
+
+// TestTrackHandler_InvalidJSONReturnsJSONContentType は、/api/analytics/track に
+// 不正な JSON を POST したとき、エラー応答のボディが {"error": "..."} 形状の
+// JSON で返るだけでなく Content-Type ヘッダも application/json になることを
+// 検証する。Go 標準の http.Error は Content-Type を text/plain に強制するため、
+// JSON ボディ + text/plain ヘッダという整合しない応答を防ぐ回帰テスト。
+func TestTrackHandler_InvalidJSONReturnsJSONContentType(t *testing.T) {
+	resetState()
+	req := httptest.NewRequest(http.MethodPost, "/api/analytics/track", bytes.NewReader([]byte("not json")))
+	w := httptest.NewRecorder()
+	trackHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("expected Content-Type to start with application/json, got %q", ct)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["error"] != "invalid JSON payload" {
+		t.Fatalf("expected error=%q, got %q", "invalid JSON payload", resp["error"])
+	}
+}
