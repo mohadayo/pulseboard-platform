@@ -1,4 +1,11 @@
-.PHONY: up down test test-python test-go test-ts lint lint-python lint-go lint-ts build health clean
+.PHONY: help up down test test-python test-go test-ts lint lint-python lint-go lint-ts build health clean
+
+# ---------------------------------------------------------------------------
+# 既定ゴールは `help` にしておき、引数なしの `make` 実行で利用可能なターゲットの
+# 一覧が表示されるようにする。CI などで明示的にターゲットを指定するケースには
+# 影響しない。
+# ---------------------------------------------------------------------------
+.DEFAULT_GOAL := help
 
 # ---------------------------------------------------------------------------
 # `make health` の設定。既定値は docker-compose.yml / .env.example と一致させ、
@@ -13,35 +20,44 @@ NOTIFICATION_PORT ?= 5003
 # 監視系側で行う。
 HEALTH_TIMEOUT ?= 3
 
-up:
+# ---------------------------------------------------------------------------
+# `make help`
+#   各ターゲット宣言行の末尾コメント `## 説明` を awk で抽出し、
+#   アライメント付きで出力する。説明の無いターゲットは表示されない。
+# ---------------------------------------------------------------------------
+help: ## 利用可能な make ターゲットの一覧を表示
+	@echo "使用可能なターゲット:"
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+up: ## 全サービスをビルドしてバックグラウンド起動
 	docker compose up --build -d
 
-down:
+down: ## 全サービスを停止
 	docker compose down
 
-build:
+build: ## 全サービスの Docker イメージをビルド
 	docker compose build
 
-test: test-python test-go test-ts
+test: test-python test-go test-ts ## 全言語のテストを実行 (python/go/ts)
 
-test-python:
+test-python: ## user-api (Python) の pytest を実行
 	cd services/user-api && pip install -r requirements.txt -q && pytest -v
 
-test-go:
+test-go: ## analytics-engine (Go) の go test を実行
 	cd services/analytics-engine && go test -v ./...
 
-test-ts:
+test-ts: ## notification-service (TS) の npm test を実行
 	cd services/notification-service && npm install && npm test
 
-lint: lint-python lint-go lint-ts
+lint: lint-python lint-go lint-ts ## 全言語の lint を実行 (python/go/ts)
 
-lint-python:
+lint-python: ## user-api (Python) の flake8 を実行
 	cd services/user-api && flake8 .
 
-lint-go:
+lint-go: ## analytics-engine (Go) の go vet を実行
 	cd services/analytics-engine && go vet ./...
 
-lint-ts:
+lint-ts: ## notification-service (TS) の eslint を実行
 	cd services/notification-service && npm install && npx eslint src/
 
 # ---------------------------------------------------------------------------
@@ -64,12 +80,12 @@ define health_check
 	fi
 endef
 
-health:
+health: ## 全サービスの /health エンドポイントを一次診断
 	$(call health_check,User API,$(USER_API_PORT))
 	$(call health_check,Analytics Engine,$(ANALYTICS_PORT))
 	$(call health_check,Notification Service,$(NOTIFICATION_PORT))
 
-clean:
+clean: ## コンテナ/イメージ/キャッシュ/node_modules を削除
 	docker compose down -v --rmi local
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	rm -rf services/notification-service/node_modules services/notification-service/dist
