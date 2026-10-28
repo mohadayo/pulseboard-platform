@@ -500,7 +500,12 @@ def delete_current_user():
         logger.warning("Account deletion for missing user: %s", email)
         return jsonify({"error": "User not found"}), 404
 
-    if user["password"] != hash_password(current_raw):
+    # login / change_password と同じく `hmac.compare_digest` で定数時間比較する。
+    # `!=` だと先頭からのバイト単位比較で短絡評価されるため、原理的には
+    # タイミング側チャネル経由でハッシュを 1 バイトずつ推測されうる。実害は
+    # SHA-256 (64 桁 hex) の全探索コストから軽微だが、同ファイル内の既存
+    # パスワード比較パターンと揃えて将来のリーディング時の疑問を減らす。
+    if not hmac.compare_digest(user["password"], hash_password(current_raw)):
         logger.warning("Account deletion with wrong current password: %s", email)
         return jsonify({"error": "Current password is incorrect"}), 401
 
@@ -800,8 +805,8 @@ def users_signups_by_day():
     フィルタは `/api/users/count` / `/api/users/by_domain` と同じ `q` / `since` / `until`。
     Sort / pagination パラメータは無視する。
 
-    `by_day` は登録日の昇順で固定する（時系列グラフへそのまま流し込めるように）。
-    `created_at` が壊れている／パースできないユーザは `unknown` 日として
+    `by_day` は登録日の昇順で固定する(時系列グラフへそのまま流し込めるように)。
+    `created_at` が壊れている/パースできないユーザは `unknown` 日として
     フォールバック集計する（`by_domain` の `unknown` ドメインと同じ思想）。
     """
     q, q_err = _normalize_q(request.args.get("q"))
