@@ -1,0 +1,76 @@
+# Markdown 内リンクの静的検査
+#
+# 目的:
+#   `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+#   `CODE_OF_CONDUCT.md`, `docs/*.md`, `services/**/*.md` 等、リポジトリ内の
+#   Markdown に埋め込まれたリンクを lychee で一括検証し、以下の種類の破損を
+#   PR / push / 定期実行の各タイミングで検知する:
+#     - 相対パスで指したリポジトリ内ファイルの rename / 削除漏れ
+#     - 外部 URL (ドキュメント / 参考リンク) の 404 化
+#     - `./` と `../` を跨いだ誤ったセクションアンカー
+#
+# 設計上のポイント:
+#   - 既存の yamllint / actionlint / codeql / dependency-review と役割分担。
+#     yamllint は YAML そのもの、actionlint は Actions セマンティクス、
+#     CodeQL は SAST、dependency-review は依存脆弱性、本ワークフローは
+#     ドキュメントのリンク健全性、と分離。
+#   - lychee は Rust 製で高速かつ false positive が少ない公式 Action を使用。
+#   - 権限は `contents: read` のみに限定し、PR への書き戻し等は行わない。
+#   - `paths` フィルタで `**/*.md` と設定ファイル・本ワークフロー変更時のみ発火。
+#   - 週次 schedule (日曜 04:00 UTC) で外部 URL の chain-rot も追従する。
+#   - 共有設定は `.github/lychee.toml` に集約し、ローカルでも `lychee --config`
+#     で同じ結果が得られるようにする。
+#   - `timeout-minutes: 5`, `concurrency` によりランナー使用量を節約。
+
+name: markdown-link-check
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.md'
+      - '.github/lychee.toml'
+      - '.github/workflows/markdown-link-check.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - '.github/lychee.toml'
+      - '.github/workflows/markdown-link-check.yml'
+  schedule:
+    # 毎週日曜 04:00 UTC (Asia/Tokyo で日曜 13:00) に外部リンクの再検証
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: markdown-link-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lychee:
+    name: lychee
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore lychee cache
+        uses: actions/cache@v4
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.sha }}
+          restore-keys: |
+            lychee-
+
+      - name: Run lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config .github/lychee.toml
+            --no-progress
+            './**/*.md'
+          fail: true

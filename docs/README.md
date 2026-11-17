@@ -38,3 +38,8 @@
 - ドキュメント本文の記述スタイル（見出しレベル・箇条書き・注記の書式）は既存ドキュメントに合わせてください。
 - サービス固有の詳細（例: `services/<service-name>/` 特有の設定手順など）は、そのサービスのディレクトリ配下に README を置くほうがオーナーシップが明確になります。ここに集約すべきなのは、複数サービスを横断する視点のドキュメントです。
 - 新しい概念・用語を導入した場合は [`GLOSSARY.md`](./GLOSSARY.md) にも 1〜3 行で追記し、複数ドキュメント間で語彙が乖離しないようにしてください。
+
+## 自動チェック（CI）
+
+- 本ディレクトリ配下およびリポジトリ全体の `**/*.md` 内リンクは、[`markdown-link-check`](../.github/workflows/markdown-link-check.yml) ワークフローで PR 時 / `main` push 時 / 週次定期実行時に自動検証されます。相対パスの破損・外部 URL の 404 は CI で検知されるため、ドキュメントの rename / 移設時は参照側も含めて更新してください。
+- CI と同じ検査をローカルで行うには、[`lychee`](https://github.com/lycheeverse/lychee) をインストールした上で、リポジトリルートで `lychee --config .github/lychee.toml './**/*.md'` を実行してください。共有設定は [`.github/lychee.toml`](../.github/lychee.toml) に集約されています。

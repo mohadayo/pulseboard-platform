@@ -1,0 +1,59 @@
+# lychee (Markdown リンク検査) の共有設定
+#
+# 本ファイルは `.github/workflows/markdown-link-check.yml` と、ローカル実行
+# (`lychee --config .github/lychee.toml './**/*.md'`) の両方から参照される
+# 単一情報源 (single source of truth) として機能する。
+#
+# 設計意図:
+#   - 外部サービス側の一時的な 429/503 で CI を落とさないよう、accept には
+#     2xx に加えて 429 を含める。403 はガチの不達と区別するため含めない。
+#   - リポジトリ内相対パスは base_dir から解決し、`docs/*.md` <-> `../*.md`
+#     の往復も同じ解釈になるようにする。
+#   - 外部 URL のタイムアウトは控えめ (20s) にしてランナー時間を節約。
+#   - exclude には、検査対象として扱わないテンプレ URL (例: localhost /
+#     example.com / RFC 2606 の予約ドメイン) を含める。
+
+# リンク解決のベースディレクトリ（リポジトリルート）
+base = "."
+
+# 外部 URL アクセス時のタイムアウト（秒）
+timeout = 20
+
+# 1 ホストあたりの同時接続数（相手側のレートリミット対策）
+max_concurrency = 8
+
+# 外部 URL に付与する User-Agent（一部 CDN で既定の reqwest が弾かれるのを回避）
+user_agent = "Mozilla/5.0 (compatible; lychee/0.15; +https://github.com/lycheeverse/lychee)"
+
+# fail としない HTTP ステータス
+# 200 系に加えて、短期的なレート制限 (429) ・認証必須 (401) を許容する。
+# 401 は「外部にリンクを張っているが未認証では読めない」記事等で発生する正当系。
+accept = [200, 201, 202, 203, 204, 206, 301, 302, 303, 304, 307, 308, 401, 429]
+
+# 検査対象から除外するパターン（RFC 2606 の予約ドメイン・ローカル・テンプレ）
+exclude = [
+  "^https?://localhost(:\\d+)?(/.*)?$",
+  "^https?://127\\.0\\.0\\.1(:\\d+)?(/.*)?$",
+  "^https?://0\\.0\\.0\\.0(:\\d+)?(/.*)?$",
+  "^https?://.*\\.example\\.com(/.*)?$",
+  "^https?://example\\.(com|org|net)(/.*)?$",
+  "^mailto:.*$",
+]
+
+# tel: スキームはそもそも HTTP 検査対象外。念のため exclude_mail でメール除外。
+exclude_mail = true
+
+# ネットワーク到達性に依存しない内部リンク (相対パス) はキャッシュしない代わりに
+# 外部 URL はキャッシュを有効にして CI を速くする。
+cache = true
+max_cache_age = "1d"
+
+# 検査対象から常に除外するパス（node_modules / 生成物 / バイナリ資産）
+exclude_path = [
+  "node_modules",
+  "dist",
+  "build",
+  ".git",
+  "services/notification-service/node_modules",
+  "services/notification-service/dist",
+]
