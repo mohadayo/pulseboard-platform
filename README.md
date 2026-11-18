@@ -1,6 +1,10 @@
 # PulseBoard Platform
 
 [![CI](https://github.com/mohadayo/pulseboard-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/ci.yml)
+[![actionlint](https://github.com/mohadayo/pulseboard-platform/actions/workflows/actionlint.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/actionlint.yml)
+[![CodeQL](https://github.com/mohadayo/pulseboard-platform/actions/workflows/codeql.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/codeql.yml)
+[![Dependency Review](https://github.com/mohadayo/pulseboard-platform/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/dependency-review.yml)
+[![markdown-link-check](https://github.com/mohadayo/pulseboard-platform/actions/workflows/markdown-link-check.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/markdown-link-check.yml)
 [![yamllint](https://github.com/mohadayo/pulseboard-platform/actions/workflows/yamllint.yml/badge.svg)](https://github.com/mohadayo/pulseboard-platform/actions/workflows/yamllint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-3776ab.svg?logo=python&logoColor=white)](services/user-api)
