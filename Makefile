@@ -88,4 +88,6 @@ health: ## 全サービスの /health エンドポイントを一次診断
 clean: ## コンテナ/イメージ/キャッシュ/node_modules を削除
 	docker compose down -v --rmi local
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name '*.tsbuildinfo' -exec rm -f {} + 2>/dev/null || true
 	rm -rf services/notification-service/node_modules services/notification-service/dist
